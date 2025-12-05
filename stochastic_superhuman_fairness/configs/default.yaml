@@ -1,0 +1,67 @@
+# =========================
+# General experiment settings
+# =========================
+seed: 42
+device: cuda
+
+global:
+  eval_freq: 5     # global fallback for evaluation frequency
+
+# =========================
+# Fairness metric selection
+# =========================
+metrics:
+  use: ["D.DP", "D.EqOdds", "D.PRP", "D.Err"]
+
+# =========================
+# Subdominance configuration
+# =========================
+subdominance:
+  mode: absolute
+  rollout_aggregate: sum
+  alpha: 1.0
+  beta: 1.0
+  adaptive_beta: false
+  weight_mode: simple # simple, softmax, linear
+
+# =========================
+# Demonstrator configuration
+# =========================
+demonstrator:
+  dataset: "adult"
+  demo_size: 100
+  compute_global: true
+  normalize: True
+  normalize_mode: 'continuous'
+  overwrite: True
+  cache_dir: "./data"
+  metrics: ["D.DP", "D.EqOdds", "D.PRP", "D.Err"]
+  train_ratio: 0.8
+  protected_attrs: 
+  sensitive_attrs: ['sex']
+  save_format: "zip"
+  demo_sample: null
+
+# =========================
+# Learner configuration
+# =========================
+learner:
+  schedule:
+    # - algo: logistic
+    #   epochs: 100
+    #   lr: 0.01
+    #   batch_size: 10
+    #   eval_freq: 20
+
+    - algo: mlp
+      epochs: 20
+      lr: 0.0004
+      hidden_size: 64
+      eval_freq: 5
+    #
+    # - algo: ppo
+    #   epochs: 100
+    #   lr: 0.0003
+    #   gamma: 0.99
+    #   value_coef: 0.5
+    #   eval_freq: 10

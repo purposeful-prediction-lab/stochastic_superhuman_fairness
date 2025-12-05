@@ -1,0 +1,85 @@
+[project]
+name = "stochastic-superhuman-fairness"
+version = "0.1.0"
+description = "A modular framework for fairness learning using subdominance and stochastic optimization"
+authors = [
+    { name = "Nikolaos Agadakos" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+
+# ─────────────────────────────────────────────
+# Core runtime dependencies
+# ─────────────────────────────────────────────
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "pytest",
+    "torch>=2.9.0",
+    "omegaconf>=2.3.0",
+    "hydra-core>=1.3.2",
+    "ipdb>=0.13.13",
+]
+
+# ─────────────────────────────────────────────
+# Developer dependencies (installed with `uv pip install -e .[dev]`)
+# ─────────────────────────────────────────────
+[project.optional-dependencies]
+dev = [
+    "pytest-cov",
+    "colorama",
+    "black",
+    "ruff",
+]
+
+# ─────────────────────────────────────────────
+# Build system
+# ─────────────────────────────────────────────
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ─────────────────────────────────────────────
+# Package discovery
+# ─────────────────────────────────────────────
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["stochastic_superhuman_fairness*"]
+
+# ─────────────────────────────────────────────
+# UV configuration
+# ─────────────────────────────────────────────
+[tool.uv]
+required-version = ">=0.4"
+
+# ─────────────────────────────────────────────
+# Hatch-compatible script shortcuts (usable via `uv run <name>`)
+# ─────────────────────────────────────────────
+[tool.hatch.envs.default.scripts]
+test = "pytest"
+test-cov = "pytest --cov --cov-report=html"
+lint = "ruff check stochastic_superhuman_fairness"
+format = "black stochastic_superhuman_fairness"
+
+# ─────────────────────────────────────────────
+# Pytest configuration
+# ─────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["stochastic_superhuman_fairness/tests"]
+# Verbose, colorized output with visible print() and coverage summary
+#addopts = "-v -s --color=yes --tb=short --cov=stochastic_superhuman_fairness --cov-report=term-missing"
+
+# ─────────────────────────────────────────────
+# Ruff (linter)
+# ─────────────────────────────────────────────
+[tool.ruff]
+line-length = 88
+select = ["E", "F"]
+ignore = ["E501"]
+
+# ─────────────────────────────────────────────
+# Black (formatter)
+# ─────────────────────────────────────────────
+[tool.black]
+line-length = 88

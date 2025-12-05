@@ -1,0 +1,9 @@
+
+data:
+  name: "compas"
+  label_col: "two_year_recid"
+  protected_attrs: ["sex", "race"]
+  normalize: true
+  one_hot: true
+  train_ratio: 0.8
+  cache_dir: "./data"

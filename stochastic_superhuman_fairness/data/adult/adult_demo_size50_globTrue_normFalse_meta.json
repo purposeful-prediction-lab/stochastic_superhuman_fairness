@@ -1,0 +1,8 @@
+{
+  "dataset": "adult",
+  "demo_size": 50,
+  "compute_global": true,
+  "normalize": false,
+  "n_demos": 520,
+  "n_features": 101
+}
