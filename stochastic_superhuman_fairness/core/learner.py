@@ -97,8 +97,11 @@ class Learner:
     def run(self):
         """Execute the full training schedule."""
         for phase_idx, phase_cfg in enumerate(self.schedule):
+            scfg = getattr(self.cfg, 'subdominance', {})
             algo = phase_cfg["algo"]
             epochs = phase_cfg.get("epochs", 1)
+            batch_size = phase_cfg.get("batch_size", 1)
+            subdom_type = getattr(scfg, "type", "standard").lower()
             print(f"\n🚀 Phase {phase_idx+1}/{len(self.schedule)} — {algo.upper()} ({epochs} epochs)")
 
             # Initialize or switch model
@@ -123,7 +126,7 @@ class Learner:
             # Phase training loop
             # ----------------------
             for ep in range(epochs):
-                stats_train = self.model.train_one_epoch(self.demo)
+                stats_train = self.model.train_one_epoch(self.demo, batch_size = batch_size, subdom_type = subdom_type)
                 stats_train.update({
                     "epoch": ep,
                     "phase": phase_idx,

@@ -61,3 +61,16 @@ def phi_mean_per_demo(
     if _is_tensor(phis[0]):
         return torch.stack(phis, dim=0)
     return np.stack(phis, axis=0)
+
+def exp_phi(
+    demos: List[Dict[str, TensorLike]],
+    **kwargs,
+) -> TensorLike:
+    """
+    Compute mean φ(X, y) for each demo in a list.
+    Returns shape [N_demos, D(+1)].
+    """
+    phis = [phi_mean(d["X"], d["y"], **kwargs) for d in demos]
+    if _is_tensor(phis[0]):
+        return torch.stack(phis, dim=0)
+    return np.stack(phis, axis=0)

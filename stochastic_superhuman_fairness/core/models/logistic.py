@@ -3,6 +3,8 @@ import torch.nn as nn
 import numpy as np
 
 from stochastic_superhuman_fairness.core.models.base_model import BaseModel
+from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
+from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_directional_cost
 from stochastic_superhuman_fairness.core.models.utils import (
     phi_features,
     phi_mean,
@@ -26,7 +28,7 @@ class LogisticRegressionModel(BaseModel):
 
     def __init__(self, cfg, demonstrator):
         super().__init__(cfg, demonstrator)
-        meta = demonstrator.dataset["metadata"]
+        meta = demonstrator.get_metadata()
         n_features = meta["n_features"]
 
         self.policy = nn.Linear(n_features, 1, bias=True)
@@ -36,14 +38,6 @@ class LogisticRegressionModel(BaseModel):
         self.device = cfg.get("device", "cpu")
         self.policy.to(self.device)
 
-        # --- subdominance configuration ---
-        self.subdom_mode = cfg.get("subdom_mode", "absolute")
-        self.subdom_agg = cfg.get("subdom_agg", "mean")
-        self.subdom_weight_mode = cfg.get("subdom_weight_mode", "softmax")  # or "linear"
-        self.alpha = cfg.get("alpha")
-        self.beta = cfg.get("beta")
-
-        self.metrics_list = self._resolve_metrics(cfg, demonstrator)
     # ----------------------------------------------------------
     def parameters(self):
         return self.policy.parameters()
@@ -51,15 +45,16 @@ class LogisticRegressionModel(BaseModel):
     def forward(self, X):
         return self.policy(X)
     # ----------------------------------------------------------
-    def compute_phi(self, X, y, add_bias=True, y_domain="01"):
+    def compute_phi(self, X, y, add_bias=False, y_domain="01"):
         return phi_features(X, y, add_bias=add_bias, y_domain=y_domain)
     # ----------------------------------------------------------
-    def phi_mean(self, X, y, add_bias=True, y_domain="01"):
+    def phi_mean(self, X, y, add_bias=False, y_domain="01"):
         return phi_mean(X, y, add_bias=add_bias, y_domain=y_domain)
     # ----------------------------------------------------------
-    def phi_mean_per_demo(self, demos, add_bias=True, y_domain="01"):
-        return super().phi_mean_per_demo(demos, add_bias=add_bias, y_domain=y_domain)
+    def exp_phi(self, demos, add_bias=False, y_domain="01"):
+        return super().exp_phi(demos, add_bias=add_bias, y_domain=y_domain)
     # ----------------------------------------------------------
+
     def train_gradient_descent_step(self, X, y):
         """Standard BCE + optional subdominance gradient signal."""
         self.opt.zero_grad(set_to_none=True)
@@ -73,188 +68,194 @@ class LogisticRegressionModel(BaseModel):
         """Compatibility placeholder; logistic model trains per epoch."""
         return {"status": "LogisticRegressionModel uses train_one_epoch() instead."}
     # ----------------------------------------------------------
-    def train_one_epoch_old(self, demonstrator, y_domain="01"):
+    def compute_weighted_closed_form_grad(self, demos, weights, target_key = 'y', y_domain="01"):
         """
-        Train for one epoch using stored demo fairness features.
-        Each batch is a list of demo samples from Demonstrator.iter_batches().
+        Torch-native closed-form gradient for standard + stochastic modes:
+
+            g = Σ_r  w_r * (φ_r - φ_demo_mean)
+            target_key: str = y or y_demo for logistic_regression produced y labels.
+        All inputs may be on CPU or CUDA. Output is a torch tensor [F+1].
         """
-        batch_size = self.cfg.get("batch_size", 1)
-        total_loss, total_subdom = 0.0, 0.0
-        batch_count = 0
+        device = self.device
 
-        # ---- Use precomputed demo fairness features ----
-        f_d = torch.as_tensor(
-            np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
-            dtype=torch.float32,
-            device=self.device,
-        )  # [D, K]
-        f_d_mean = f_d.mean(dim=0, keepdim=True)  # [1, K]
+        # ---- 1) φ_r for each rollout (torch) ----
+        phi_r_list = []
+        for d in demos:
+            Xd = d["X"].to(device)
+            yd = d[target_key].to(device)
+            phi_r = self.phi_mean(Xd, yd, add_bias=False, y_domain=y_domain)   # [F+1], torch
+            phi_r_list.append(phi_r)
 
-        # ---- iterate through demo batches ----
-        for demo_batch in demonstrator.iter_batches(batch_size=batch_size, as_torch=True, device=self.device):
-            batch_count += 1
-            for d in demo_batch:
-                Xb, yb, Ab = d["X"], d["y"], d["A"]
+        phi_r = torch.stack(phi_r_list, dim=0)   # [R, F+1]
 
-                logits = self.policy(Xb).squeeze(-1)
-                y_hat = torch.sigmoid(logits)
-                yb = yb.view_as(y_hat)
-                zero_one_loss = self.zero_one_loss(y_hat, yb)
+        # ---- 2) φ_demo_mean (torch) ----
+        # phi_mean_per_demo still returns numpy → convert once
+        #  phi_demo_np = self.phi_mean_per_demo(demos, add_bias=False, y_domain=y_domain)
+        #  phi_demo_mean = torch.as_tensor(phi_demo_np, device=device, dtype=torch.float32)
+        phi_demo_mean = self.exp_phi(demos, add_bias = False)
 
-                # fairness for rollout
-                f_r = (
-                    torch.as_tensor(d["fairness_feats"], dtype=torch.float32, device=self.device)
-                    if "fairness_feats" in d
-                    else compute_fairness_features(Xb, yb, y_hat, Ab, metrics=self.metrics_list)
-                )
+        # ---- 3) convert weights to torch ----
+        if not torch.is_tensor(weights):
+            weights = torch.as_tensor(weights, device=device, dtype=torch.float32)
+        weights = weights.view(-1, 1)   # [R,1]
 
-                # subdominance vs demo fairness
-                subdom_out = subdominance_loss_from_features(
-                    rollout_feats=f_r[None, :],
-                    demo_feats=f_d,
-                    mode=self.subdom_mode,
-                    agg=self.subdom_agg,
-                    alpha=self.alpha,
-                    beta=self.beta,
-                    reduction="none",
-                )
-                S = subdom_out["S"].squeeze(0)
-                w = S.mean()
-                total_subdom += float(w.item())
-
-                # φ difference weighted by subdominance
-                phi_r_mean = self.compute_phi(Xb, yhat, add_bias=True, y_domain=y_domain).mean(dim=0)
-                phi_d_means = self.phi_mean_per_demo(demonstrator.train_demos, add_bias=True, y_domain=y_domain)
-                phi_d_means = torch.as_tensor(phi_d_means, dtype=torch.float32, device=self.device)
-                phi_d_mean = phi_d_means.mean(dim=0)
-
-                g = w * (phi_r_mean - phi_d_mean)
-                assert g.numel() == self.policy.in_features + 1
-
-                g_w, g_b = g[:-1], g[-1].unsqueeze(0)
-                self.policy.weight.data -= self.lr * g_w
-                self.policy.bias.data -= self.lr * g_b
-
-                total_loss += float(zero_one_loss.item())
-
-        # ---- training averages ----
-        avg_loss = total_loss / max(batch_count, 1)
-        avg_subdom = total_subdom / max(batch_count, 1)
-
-        # ---- optional evaluation ----
-        eval_demo = demonstrator.eval_demos[0] if demonstrator.eval_demos else None
-        if eval_demo is not None:
-            Xe = torch.as_tensor(eval_demo["X"], dtype=torch.float32, device=self.device)
-            ye = torch.as_tensor(eval_demo["y"], dtype=torch.float32, device=self.device)
-            Ae = torch.as_tensor(eval_demo["A"], dtype=torch.float32, device=self.device)
-            with torch.no_grad():
-                y_hat_eval = torch.sigmoid(self.policy(Xe).squeeze(-1))
-                fair_eval = compute_fairness_features(Xe, ye, y_hat_eval, Ae, metrics=self.metrics_list)
-                subdom_eval = subdominance_loss_from_features(
-                    rollout_feats=fair_eval[None, :],
-                    demo_feats=f_d,
-                    mode=self.subdom_mode,
-                    agg=self.subdom_agg,
-                    alpha=self.alpha,
-                    beta=self.beta,
-                    reduction="none",
-                )
-        else:
-            fair_eval, subdom_eval = None, None
-
-        return {
-            "zero_one_loss/train": avg_loss,
-            "mean_subdom/train": avg_subdom,
-            "fairness/train": f_r.detach().cpu().numpy().tolist(),
-            "zero_one_loss/eval": float(subdom_eval["S"].mean().item()) if eval_demo else None,
-            "fairness/eval": fair_eval.detach().cpu().numpy().tolist() if fair_eval is not None else None,
-        }
+        # ---- 4) closed-form formula ----
+        g = (weights * (phi_r - phi_demo_mean)).sum(dim=0)   # [F+1]
+        #  import ipdb;ipdb.set_trace()
+        return g
     # ----------------------------------------------------------
-    def train_one_epoch(self, demonstrator, y_domain="01", shuffle_batch_each_epoch: bool = True):
-        """
-        Vectorized epoch: process demo batches together efficiently.
-        Uses precomputed fairness features from the demonstrator.
-        Returns training metrics with 'train/' prefix.
-        """
-        demonstrator.to_torch(self.device)
-        batch_size = self.cfg.get("batch_size", 1)
-        total_loss, total_subdom, total_subdom_std = 0.0, 0.0, 0.0
-        batch_count = 0
+    def train_one_epoch_standard(self, demonstrator, batch_size: int = 1):
+        device = self.device
+        demonstrator.to_torch(device)
 
-        # ---- Precompute demo fairness once ----
+        demos = demonstrator.train_demos
+        # demo fairness (torch) for all demos once
         f_d = torch.as_tensor(
-            np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
-            dtype=torch.float32,
-            device=self.device,
+            np.stack([d["fairness_feats"] for d in demos]),
+            device=device, dtype=torch.float32
         )
 
-        # ---- Training loop ----
-        for demo_batch in demonstrator.iter_batches(batch_size=batch_size, shuffle = shuffle_batch_each_epoch):
+        total_subdom = total_std = total_zero_one = 0.0
+        batch_count = 0
+
+        for demo_batch in demonstrator.iter_batches(batch_size=batch_size, shuffle=True):
             batch_count += 1
 
-            # Concatenate all demos in this batch
-            #  import ipdb;ipdb.set_trace()
-            Xb = torch.cat([d["X"] for d in demo_batch], dim=0)
-            yb = torch.cat([d["y"] for d in demo_batch], dim=0)
-            Ab = torch.cat([d["A"] for d in demo_batch], dim=0)
+            rollout_feats = []
+            zero_one_list = []
 
-            # Forward pass
-            #  import ipdb;ipdb.set_trace()
-            logits = self.policy(Xb).squeeze(-1)
-            y_hat = torch.sigmoid(logits)
-            yb = yb.view_as(y_hat)
-            zero_one_loss = self.zero_one_loss(y_hat, yb)
+            # ---------- 1) collect rollouts ----------
+            for d in demo_batch:
+                X = d["X"].to(device)
+                #  y = d["y"].to(device)
+                y = demonstrator.get_targets(d).to(device)
+                A = d["A"].to(device)
 
-            # Fairness + subdominance
-            f_r = compute_fairness_features(Xb, yb, y_hat, Ab, metrics=self.metrics_list)
+                logits = self.policy(X).squeeze(-1)
+                y_hat = torch.sigmoid(logits)
+
+                zero_one_list.append(self.zero_one_loss(y_hat, y).item())
+
+                f_r = compute_fairness_features(X, y, y_hat, A, self.metrics_list)
+                rollout_feats.append(f_r)
+
+            rollout_feats = torch.stack(rollout_feats, dim=0)  # [R,K]
+
+            # ---------- 2) subdominance via dispatcher ----------
             subdom_out = subdominance_loss_from_features(
-                rollout_feats=f_r[None, :],
+                rollout_feats=rollout_feats,
                 demo_feats=f_d,
                 mode=self.subdom_mode,
                 agg=self.subdom_agg,
-                alpha=self.alpha,
-                beta=self.beta,
+                alpha=self.compute_alpha(),
+                beta=self.compute_beta(),
                 reduction="none",
             )
-            S = subdom_out["S"].squeeze(0)
-            w = S.mean()
-            total_subdom += float(w.item())
-            total_subdom_std += float(S.std().item())
-
-            # φ feature difference weighted by subdominance
+            S = subdom_out["S"]      # [R,D]
+            v = subdom_out["per_rollout"]      # [R] per-rollout aggregated subdom
             #  import ipdb;ipdb.set_trace()
-            phi_r_mean = self.compute_phi(Xb, yb, add_bias=True, y_domain=y_domain).mean(dim=0)
-            phi_d_means = self.phi_mean_per_demo(demonstrator.train_demos, add_bias=True, y_domain=y_domain)
-            phi_d_means = torch.as_tensor(phi_d_means, dtype=torch.float32, device=self.device)
-            phi_d_mean = phi_d_means.mean(dim=0)
-            g = w * (phi_r_mean - phi_d_mean)
+            weights_t = v            # standard: per-rollout weights = v
+            total_subdom += weights_t.mean().item()
+            total_std    += S.std().item()
+            total_zero_one += float(np.mean(zero_one_list))
 
-            # Gradient update
-            assert g.numel() == self.policy.in_features + 1
-            g_w, g_b = g[:-1], g[-1].unsqueeze(0)
-            #  print(f"[DEBUG] w={w.item():.4f},  |phi_r_mean|={phi_r_mean.norm():.4f},  "
-            #    f"|phi_d_mean|={phi_d_mean.norm():.4f},  |g|={g.norm():.4f}")
+            # ---------- 3) closed-form update (uses numpy helper) ----------
+            #  weights_np = weights_t.detach().cpu().numpy()
+            g = self.compute_weighted_closed_form_grad(
+                demos=demo_batch,
+                weights=weights_t,
+                target_key = demonstrator.target_key(),
+                y_domain="01",
+            )  # np array [F+1]
 
-            self.policy.weight.data -= self.lr * g_w
-            self.policy.bias.data  -= self.lr * g_b
-
-            total_loss += float(zero_one_loss.item())
-
-        # ---- Averages ----
-        avg_loss = total_loss / max(batch_count, 1)
-        avg_subdom = total_subdom / max(batch_count, 1)
-        std_subdom = total_subdom_std / max(batch_count, 1)
-
+            #  g_w, g_b = g[:-1], g[-1]
+            g_w = g
+            self.policy.weight.data -= self.lr * torch.as_tensor(g_w, dtype=torch.float32, device=device)
+            #  self.policy.bias.data   -= self.lr * torch.as_tensor([g_b], dtype=torch.float32, device=device)
+        #  import ipdb;ipdb.set_trace()
         return {
-            "train/zero_one_loss": avg_loss,
-            "train/mean_subdom": avg_subdom,
-            "train/std_subdom": std_subdom,
-            "train/fairness": f_r.detach().cpu().numpy().tolist(),
+            "train/zero_one_loss": total_zero_one / batch_count,
+            "train/mean_subdom":   total_subdom / batch_count,
+            "train/std_subdom":    total_std / batch_count,
+            "train/fairness":      rollout_feats.mean(dim=0).detach().cpu().tolist(),
+        }
+    # ----------------------------------------------------------
+    def train_one_epoch_stochastic(self, demonstrator, batch_size=1, n_dir=20):
+        """
+        Stochastic subdominance training for Logistic Regression:
+          1) One rollout per demo → compute fairness_feats
+          2) Build full subdominance matrix S[R,D]
+          3) Solve OT → get gamma + duals + weights
+          4) UPDATE model (closed-form stub for now)
+          5) Return metrics
+        """
+        demos = demonstrator.train_demos
+        R = len(demos)
+        import ipdb;ipdb.set_trace()
+        # ----------------------------------------------------
+        # 1) Collect rollouts (compute fairness features only)
+        # ----------------------------------------------------
+        rollout_feats = []
+        for d in demos:
+            Xd, yd, Ad = d["X"], demonstrator.get_targets(d), d["A"]
+            logits = Xd @ self.policy.weight.detach().cpu().numpy() + self.policy.bias.detach().cpu().numpy()
+            y_hat = 1 / (1 + np.exp(-logits))
+            f_r = compute_fairness_features(Xd, yd, y_hat, Ad, self.metrics_list)
+            rollout_feats.append(f_r)
+        rollout_feats = np.stack(rollout_feats)         # [R, Kf]
+
+        # demo fairness matrix
+        demo_feats = np.stack([d["fairness_feats"] for d in demos])   # [D,Kf]
+
+        # ----------------------------------------------------
+        # 2) Compute subdominance matrix S[R,D]
+        # ----------------------------------------------------
+        S = compute_subdominance_matrix(
+            rollout_feats,
+            demo_feats,
+            mode=self.subdom_mode,
+            alpha=self.compute_alpha(),       # placeholder
+            beta=self.compute_beta(),         # placeholder
+        )
+
+        # ----------------------------------------------------
+        # 3) Compute directional costs (pre-OT)
+        # ----------------------------------------------------
+        dir_cost = compute_directional_cost(rollout_feats, demo_feats, n_dir=n_dir)
+
+        # ----------------------------------------------------
+        # 4) Solve OT / QP → get weights
+        # ----------------------------------------------------
+        out = solve_stochastic_subdom_coupling(
+            S,
+            solver="mosek",
+            weight_method="primal",           # or "dual" / "row_dual"
+            debias_rowcol=True,
+            normalize=True,
+        )
+
+        weights = out["weights_np"]          # shape [R]
+
+        # ----------------------------------------------------
+        # 5) CLOSED-FORM UPDATE (placeholder)
+        # ----------------------------------------------------
+        self.update_stochastic_closed_form(
+            rollout_feats, demo_feats, weights
+        )
+
+        # ----------------------------------------------------
+        # 6) Return metrics
+        # ----------------------------------------------------
+        return {
+            "train/zero_one_loss": float(np.mean([d["zero_one"] for d in demos])) if "zero_one" in demos[0] else None,
+            "train/mean_subdom": float(S.mean()),
+            "train/std_subdom": float(S.std()),
+            "train/fairness": rollout_feats.mean(axis=0).tolist(),
+            "train/directional_cost": dir_cost,
         }
     # ==============================================================
     # EVALUATION METHOD
     # ==============================================================
-    
     def evaluate(self, demonstrator, y_domain="01"):
         """
         Vectorized evaluation over all evaluation demos.

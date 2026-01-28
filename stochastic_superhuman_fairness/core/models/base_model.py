@@ -26,6 +26,7 @@ class BaseModel(ABC, nn.Module):
         # --- subdominance configuration ---
         scfg = cfg.get('subdominance', {})
         self.subdom_mode = scfg.get("mode", "absolute")
+        self.subdom_type = scfg.get("type", "standard")
         self.subdom_agg = scfg.get("rollout_aggregate", "mean")
         self.subdom_weight_mode = scfg.get("weight_mode", "softmax")  # or "linear"
         self.alpha = scfg.get("alpha")
@@ -34,6 +35,7 @@ class BaseModel(ABC, nn.Module):
         self.metrics_list = self._resolve_metrics(cfg, demonstrator)
 
     # ----------------------------------------------------------
+
     @abstractmethod
     def forward(self, X):
         """Return raw model output (logits)."""
@@ -44,6 +46,26 @@ class BaseModel(ABC, nn.Module):
         """Perform one gradient step and return loss dict."""
         pass
 
+    # ----------------------------------------------------------
+    def train_one_epoch(self, demonstrator, batch_size: int =1, subdom_type: str = 'standard', **kwargs):
+        """
+        Selects standard vs stochastic subdominance training.
+        Each subclass must implement:
+            - train_one_epoch_standard(...)
+            - train_one_epoch_stochastic(...)
+        
+        kwargs propagate to the underlying method (batch size, shuffle, etc.)
+        """
+
+        tkwargs = {'batch_size':batch_size,  **kwargs}
+        if subdom_type == "stochastic":
+            return self.train_one_epoch_stochastic(demonstrator, **tkwargs)
+
+        elif subdom_type == "standard":
+            return self.train_one_epoch_standard(demonstrator, **tkwargs)
+
+        else:
+            raise ValueError(f"Unknown training mode '{self.cfg.subdom_mode}'")
     # ----------------------------------------------------------
     def get_state_dict(self):
         """Return dict of policy/value weights for cross-phase transfer."""
@@ -102,6 +124,15 @@ class BaseModel(ABC, nn.Module):
             print(f"ℹ️ No metrics found; using default {metrics_list}")
 
         return metrics_list
+
+    def compute_alpha(self):
+        """Placeholder – later: learn alpha per fairness dimension."""
+        return None  # triggers default α = ones(K)
+
+    def compute_beta(self):
+        """Placeholder – later: learn beta per fairness dimension."""
+        return None  # triggers default β = ones(K)
+
     def zero_one_loss(self, y_hat, y_true):
         preds = (y_hat > 0.5).float()
         return (preds != y_true).float().mean()
@@ -109,7 +140,7 @@ class BaseModel(ABC, nn.Module):
     def phi_mean_per_demo(
         self,
         demos,
-        add_bias: bool = True,
+        add_bias: bool = False,
         y_domain: str = "01",
         stochastic: bool = True,
     ):
@@ -141,3 +172,24 @@ class BaseModel(ABC, nn.Module):
             phi_d = phi_features(Xd_t, y_sample, add_bias=add_bias, y_domain=y_domain)
             phi_list.append(phi_d.mean(dim=0))
         return torch.stack(phi_list, dim=0)
+
+    def exp_phi(
+            self,
+            demos,
+            add_bias: bool = False,
+            y_domain: str = "01",
+            stochastic: bool = True,
+        ):
+            """
+            Compute mean φ(x, ŷ) for all demos under the current model.
+
+            Args:
+                demos: list of demo dicts with 'observations' arrays.
+                add_bias: whether to include bias term in φ(x, ŷ).
+                y_domain: kept for compatibility, assumed '01'.
+                stochastic: if True, sample ŷ ~ Bernoulli(p); otherwise use deterministic rounding.
+
+            Returns:
+                Tensor [F] of mean φ(x, ŷ) for the batch.
+            """
+            return self.phi_mean_per_demo(demos, add_bias = add_bias, stochastic = stochastic).mean(axis=0)

@@ -116,8 +116,9 @@ class MLPModel(BaseModel):
                 #  import ipdb;ipdb.set_trace()
                 #  S_row = out["S"][0]           # [D]
                 w = out['loss']
+                #  import ipdb;ipdb.set_trace()
                 #  w = aggregate_subdominance(S_row, self.subdom_agg)   # scalar
-                total_subdom += float(w)
+                total_subdom += float(w.item())
                 subdoms.append(w.item())
                 #  total_std    += float(S_row.std())
 

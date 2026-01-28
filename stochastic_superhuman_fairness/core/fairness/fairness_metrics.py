@@ -11,6 +11,49 @@ def _safe_mean(arr):
     return np.mean(arr) if len(arr) > 0 else 0.0
 
 # ---------------------------------------------------------------------
+# Custom Cost functions
+# ---------------------------------------------------------------------
+def compute_directional_cost(R_feats, D_feats, n_dir=20):
+    """
+    Computes directional discrepancies before the OT step.
+    R_feats: [R,K]
+    D_feats: [D,K]
+    """
+    R, K = R_feats.shape
+    D = D_feats.shape[0]
+
+    out = {"feature_combinations": {}}
+
+    # -----------------------------------------
+    # (A) All-feature random directions
+    # -----------------------------------------
+    diffs = []
+    for _ in range(n_dir):
+        v = np.random.randn(K)
+        v /= np.linalg.norm(v) + 1e-12
+        r_proj = R_feats @ v
+        d_proj = D_feats @ v
+        diffs.append(np.abs(r_proj.mean() - d_proj.mean()))
+    out["all_features_directional_cost"] = float(np.mean(diffs))
+
+    # -----------------------------------------
+    # (B) 2D feature combinations
+    # -----------------------------------------
+    for i in range(K):
+        for j in range(i+1, K):
+            name = f"f{i}_f{j}"
+            diffs = []
+            for _ in range(n_dir):
+                v = np.random.randn(2)
+                v /= np.linalg.norm(v) + 1e-12
+                r_proj = R_feats[:, [i, j]] @ v
+                d_proj = D_feats[:, [i, j]] @ v
+                diffs.append(np.abs(r_proj.mean() - d_proj.mean()))
+            out["feature_combinations"][name] = float(np.mean(diffs))
+
+    return out
+
+# ---------------------------------------------------------------------
 # Disparity Metrics
 # ---------------------------------------------------------------------
 def demographic_parity(y_pred, a):

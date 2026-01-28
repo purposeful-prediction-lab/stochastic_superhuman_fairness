@@ -17,6 +17,7 @@ metrics:
 # Subdominance configuration
 # =========================
 subdominance:
+  type: standard # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
   alpha: 1.0
@@ -29,11 +30,14 @@ subdominance:
 # =========================
 demonstrator:
   dataset: "adult"
+  demotype: lrdecisions  # partition or lrdecisions
+  n_models: 10
+  subset_ratio: 0.2
   demo_size: 100
   compute_global: true
   normalize: True
   normalize_mode: 'continuous'
-  overwrite: True
+  overwrite: False
   cache_dir: "./data"
   metrics: ["D.DP", "D.EqOdds", "D.PRP", "D.Err"]
   train_ratio: 0.8
@@ -47,17 +51,17 @@ demonstrator:
 # =========================
 learner:
   schedule:
-    # - algo: logistic
-    #   epochs: 100
-    #   lr: 0.01
-    #   batch_size: 10
-    #   eval_freq: 20
+    - algo: logistic
+      epochs: 100
+      lr: 0.01
+      batch_size: 10
+      eval_freq: 20
 
-    - algo: mlp
-      epochs: 20
-      lr: 0.0004
-      hidden_size: 64
-      eval_freq: 5
+    # - algo: mlp
+    #   epochs: 20
+    #   lr: 0.004
+    #   hidden_size: 64
+    #   eval_freq: 5
     #
     # - algo: ppo
     #   epochs: 100
