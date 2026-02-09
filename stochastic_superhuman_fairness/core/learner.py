@@ -5,18 +5,21 @@ from typing import Dict, Any
 from copy import deepcopy
 
 from stochastic_superhuman_fairness.core.models.logistic import LogisticRegressionModel
+from stochastic_superhuman_fairness.core.models.registry import MODEL_REGISTRY
 from stochastic_superhuman_fairness.core.models.mlp import MLPModel
 from stochastic_superhuman_fairness.core.models.ppo import PPOModel
-from stochastic_superhuman_fairness.core.models import logistic, mlp, ppo
+from stochastic_superhuman_fairness.core.models import logistic, mlp, ppo, bayesian_logistic
 from stochastic_superhuman_fairness.core.fairness import subdominance
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, dict_to_ns
+from stochastic_superhuman_fairness.core.models.model_io_utils import validate_schedule
 import torch, numpy as np
-
-MODEL_REGISTRY = {
-    "logistic": logistic.LogisticRegressionModel,
-    "mlp": mlp.MLPModel,
-    "ppo": ppo.PPOModel,
-}
+#
+#  MODEL_REGISTRY = {
+#      "logistic": logistic.LogisticRegressionModel,
+#      "mlp": mlp.MLPModel,
+#      "ppo": ppo.PPOModel,
+#      'bayesianlogistic': bayesian_logistic.BayesianLogisticRegressionModel,
+#  }
 
 DEFAULT_PHASE_CFG = {
     "epochs": 10,
@@ -26,9 +29,6 @@ DEFAULT_PHASE_CFG = {
     "value_coef": 0.5,
     "entropy_coef": 0.0,
 }
-
-
-
 
 class Learner:
     """
@@ -40,7 +40,6 @@ class Learner:
       - Handle switching between models (policy/value transfer)
       - Maintain logs per phase and epoch
     """
-
     def __init__(self, cfg, demonstrator, logger=None):
         self.cfg = normalize_cfg(cfg)
         self.demo = demonstrator
@@ -51,24 +50,29 @@ class Learner:
         self.global_step = 0
         # schedule: list of dicts, each with 'algo', 'epochs', and model-specific params
         # Validate + normalize training schedule
-        self.schedule = self._validate_schedule(self.cfg.learner.schedule)
+        #  self.schedule = self._validate_schedule(self.cfg.learner.schedule)
+        self.schedule = validate_schedule(self.cfg.learner.schedule, cfg=self.cfg, device=self.device)
 
     # ------------------------------------------------------------------
-    def _validate_schedule(self, schedule):
-        """Fill missing keys in schedule entries with defaults."""
-        validated = []
-        if not schedule:
-            raise ValueError("Training schedule missing in config.")
-
-        for i, phase in enumerate(schedule):
-            entry = {**DEFAULT_PHASE_CFG, **phase}
-            if "algo" not in entry:
-                raise ValueError(f"Missing 'algo' in schedule entry {i}")
-            entry["algo"] = entry["algo"].lower()
-            entry['device'] = self.device
-            entry['seed'] = self.cfg.seed
-            validated.append(dict_to_ns(entry))
-        return validated
+    #  def _validate_schedule(self, schedule, default_learner_cfg: dict = None):
+    #      """Fill missing keys in schedule entries with defaults."""
+    #      validated = []
+    #      default_learner_cfg = self.cfg.get('learner', {}).get('default', {}) if default_learner_cfg is None else default_learner_cfg
+    #      if not schedule:
+    #          raise ValueError("Training schedule missing in config.")
+    #
+    #      for i, phase in enumerate(schedule):
+    #          #  entry = {**DEFAULT_PHASE_CFG, **phase}
+    #          entry = dict_to_ns(default_learner_cfg.copy())
+    #          dict_to_ns(entry).update_from(phase)
+    #          #  dict_to_ns(entry).update_from(dict_to_ns(default_learner_cfg))
+    #          if "algo" not in entry:
+    #              raise ValueError(f"Missing 'algo' in schedule entry {i}")
+    #          entry["algo"] = entry["algo"].lower()
+    #          entry['device'] = self.device
+    #          entry['seed'] = self.cfg.seed
+    #          validated.append(dict_to_ns(entry))
+    #      return validated
     # ----------------------------------------------------------
     def _transfer_parameters(self, old_model, new_model):
         """Transfer policy/value weights between compatible models."""
@@ -99,34 +103,26 @@ class Learner:
         for phase_idx, phase_cfg in enumerate(self.schedule):
             scfg = getattr(self.cfg, 'subdominance', {})
             algo = phase_cfg["algo"]
+            train_cfg = phase_cfg.get('train', {})
             epochs = phase_cfg.get("epochs", 1)
-            batch_size = phase_cfg.get("batch_size", 1)
+            batch_size = train_cfg.get("batch_size", 1)
             subdom_type = getattr(scfg, "type", "standard").lower()
             print(f"\n🚀 Phase {phase_idx+1}/{len(self.schedule)} — {algo.upper()} ({epochs} epochs)")
 
             # Initialize or switch model
-            #  model = self._init_model(algo, phase_cfg)
-
-            #  import ipdb;ipdb.set_trace()
             self.switch_algo(algo, phase_cfg)
-            #  if self.model is not None:
-                #  model = self._transfer_params(self.model, model)
-            #  self.model = model
-
             # Log model transition
             self.logger.log_transition(phase_idx, algo)
 
             # Determine evaluation frequency
-            eval_freq = phase_cfg.get(
-                "eval_freq",
-                getattr(self.cfg['global'], "eval_freq", 5)
-            )
+            eval_freq = phase_cfg.get("eval_freq", getattr(self.cfg['global'], "eval_freq", 5))
 
             # ----------------------
             # Phase training loop
             # ----------------------
             for ep in range(epochs):
-                stats_train = self.model.train_one_epoch(self.demo, batch_size = batch_size, subdom_type = subdom_type)
+                #  import ipdb;ipdb.set_trace()
+                stats_train = self.model.train_one_epoch(self.demo, subdom_type = subdom_type, **train_cfg)
                 stats_train.update({
                     "epoch": ep,
                     "phase": phase_idx,
@@ -150,14 +146,16 @@ class Learner:
             # Save checkpoint per phase
             # ----------------------
             if self.logger:
-                self.logger.save_checkpoint(self.model, phase_idx, algo, cfg=phase_cfg)
+                self.logger.save_checkpoint(self.model, phase_idx, algo, cfg={**self.cfg, 'phase_cfg': phase_cfg})
 
         print("\n✅ Training completed.")
+
     # ----------------------------------------------------------
     def get_model(self):
         """Return current trained model."""
         return self.model
 
+    # ----------------------------------------------------------
     def _init_model(self, algo: str, phase_cfg: dict):
         """Create model for current phase with merged global config."""
         if algo not in MODEL_REGISTRY:
@@ -172,10 +170,15 @@ class Learner:
             merged_cfg["subdominance"] = self.cfg.subdominance
         if hasattr(self.cfg, "global"):
             merged_cfg["global"] = self.cfg['global']
+        # Drop bayesian configs if not needed
+        if 'bayesian' not in algo.lower():
+            if hasattr(merged_cfg.get('train'), 'bayesian'):
+                del merged_cfg['train']['bayesian']
 
         model_cls = MODEL_REGISTRY[algo]
         return model_cls(merged_cfg, self.demo)
 
+    # ----------------------------------------------------------
     def switch_algo(self, algo_name, phase_cfg):
         """Initialize a new model with parameter transfer."""
         algo_name = algo_name.lower()

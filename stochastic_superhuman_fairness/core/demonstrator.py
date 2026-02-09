@@ -40,7 +40,10 @@ class Demonstrator:
         defaults = DEFAULT_DATA_CONFIGS.get(dataset_name, {})
         for key, value in defaults.items():
             if not hasattr(self.cfg.demonstrator, key):
-                setattr(self.cfg.demonstrator, key, value)
+                try:
+                    setattr(self.cfg.demonstrator, key, value)
+                except:
+                    import ipdb;ipdb.set_trace()
         if not hasattr(self.cfg, "data") or not isinstance(self.cfg.data, NamespaceDict):
             self.cfg.data = NamespaceDict()
         for k in ["label_col", "protected_attrs", "sensitive_attrs", "normalize", "one_hot", "train_ratio"]:
@@ -162,7 +165,6 @@ class Demonstrator:
 
             return out
 
-        import ipdb;ipdb.set_trace()
         if self.dataset is None:
             self.dataset = self._load_dataset()
 
@@ -298,7 +300,7 @@ class Demonstrator:
             raise ValueError("demotype=lrdecisions requires sensitive A (cfg.demonstrator.sensitive_attrs).")
 
         cfg = self.cfg.demonstrator
-        n_models = int(getattr(cfg, "n_models", 5))
+        n_models = int(getattr(cfg, "n_models", 100))
         subset_ratio = getattr(cfg, "subset_ratio", None)
         subset_size = getattr(cfg, "subset_size", None)
 
@@ -314,6 +316,7 @@ class Demonstrator:
         demos = []
 
         for m in range(n_models):
+            print('\n'+'-'*30 + f"Training logistic demonstrator {m}/{n_models}.")
 
             idx = rng.choice(n, size=subset_size, replace=False)
 
@@ -327,6 +330,7 @@ class Demonstrator:
             lr.fit(X[idx], y[idx])
 
             y_demo = lr.predict_proba(X)[:, 1].astype(np.float32)  # decisions on full set
+            y_demo_zero_one = (lr.predict_proba(X)[:, 1] >= 0.5).astype(np.float32)
 
             fairness_feats = compute_fairness_features(
                 torch.as_tensor(X, dtype=torch.float32),
@@ -336,7 +340,7 @@ class Demonstrator:
                 metrics=cfg.metrics,
             ).detach().cpu().numpy()
 
-            demos.append({"indices": idx, "X": X, "y": y, "A": A, "y_demo": y_demo, "fairness_feats": fairness_feats})
+            demos.append({"indices": idx, "X": X, "y": y, "A": A, "y_demo": y_demo_zero_one, "fairness_feats": fairness_feats})
 
         return demos
 

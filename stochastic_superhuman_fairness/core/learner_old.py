@@ -34,7 +34,7 @@ class Learner_old:
         """Run sequential training phases defined in config."""
         for idx, phase_cfg in enumerate(self.schedule, 1):
             algo = phase_cfg["algo"]
-            print(f"\n🧭 Phase {idx}: {algo.upper()}")
+            print(f"\n Phase {idx}: {algo.upper()}")
             self._run_phase(phase_cfg)
         print("\n✅ All schedule phases complete.")
 
@@ -45,7 +45,7 @@ class Learner_old:
         batch_size = phase_cfg["batch_size"]
 
         self.switch_algo(algo, phase_cfg)
-        print(f"🚀 Training {algo.upper()} for {epochs} epochs (lr={phase_cfg['lr']})...")
+        print(f" Training {algo.upper()} for {epochs} epochs (lr={phase_cfg['lr']})...")
 
         for epoch in range(epochs):
             try:

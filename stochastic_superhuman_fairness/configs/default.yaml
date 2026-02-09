@@ -17,7 +17,7 @@ metrics:
 # Subdominance configuration
 # =========================
 subdominance:
-  type: standard # standard | stochastic
+  type: bayesian  # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
   alpha: 1.0
@@ -29,21 +29,21 @@ subdominance:
 # Demonstrator configuration
 # =========================
 demonstrator:
-  dataset: "adult"
+  dataset: "adult" # adult or compass
   demotype: lrdecisions  # partition or lrdecisions
-  n_models: 10
-  subset_ratio: 0.2
-  demo_size: 100
+  n_models: 100 # only used with lr decisions. How many classifier are trained. One per demo.
+  subset_ratio: 0.2 # subset of training data that lr classifiers are used, but provide pred to entire train set.
+  demo_size: 100  # ingored with lr decisions, only used for partitions
   compute_global: true
-  normalize: True
+  normalize: True # Constraint valuesa
   normalize_mode: 'continuous'
-  overwrite: False
+  overwrite: False # True/ False. True will force regenerate the demos, even if they exist
   cache_dir: "./data"
   metrics: ["D.DP", "D.EqOdds", "D.PRP", "D.Err"]
-  train_ratio: 0.8
-  protected_attrs: 
-  sensitive_attrs: ['sex']
-  save_format: "zip"
+  train_ratio: 0.8 # amount of data exclusively in training set
+  protected_attrs:          # these are attributes are ommited from the the features
+  sensitive_attrs: ['sex']  # these are the attributes  that fairness is measured on
+  save_format: "zip" # zip or npy. with npy a separate json metadata file is saved at data folder
   demo_sample: null
 
 # =========================
@@ -51,11 +51,19 @@ demonstrator:
 # =========================
 learner:
   schedule:
-    - algo: logistic
-      epochs: 100
-      lr: 0.01
-      batch_size: 10
-      eval_freq: 20
+    - algo: bayesianLogistic
+      epochs: 8
+      eval_freq: 2
+      model_cfg:
+        policy:
+      train:
+        lr: 0.001
+        batch_size: 100
+        bayesian:
+          dist_mode: 'full_param_mvn'
+          ema: 1.0
+          max_mean_delta:
+          var_ratio_clip: [0.1, 10.0]
 
     # - algo: mlp
     #   epochs: 20
@@ -69,3 +77,16 @@ learner:
     #   gamma: 0.99
     #   value_coef: 0.5
     #   eval_freq: 10
+    #
+  default:
+    model_cfg:
+    epochs: 10
+    train:
+      lr: 1e-3
+      batch_size: 32
+      bayesian:
+        dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn
+        beta: 1.0
+        ema : 0.2
+        var_floor: 1e-8  
+        cov_floor: 1e-6  

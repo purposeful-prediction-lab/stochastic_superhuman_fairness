@@ -2,9 +2,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from abc import ABC, abstractmethod
+from stochastic_superhuman_fairness.core.rollout_utils import collect_rollouts, RolloutBatch
 from stochastic_superhuman_fairness.core.models.utils import (
     phi_features,
 )
+from core.utils import flatten_dict
 
 class BaseModel(ABC, nn.Module):
     """
@@ -63,9 +65,43 @@ class BaseModel(ABC, nn.Module):
 
         elif subdom_type == "standard":
             return self.train_one_epoch_standard(demonstrator, **tkwargs)
-
+        elif subdom_type == "bayesian":
+            flattened_tkwargs = flatten_dict(kwargs, keep_path = False)
+            return self.train_one_epoch_stochastic_bayesian(demonstrator, **flattened_tkwargs)
         else:
             raise ValueError(f"Unknown training mode '{self.cfg.subdom_mode}'")
+
+
+    # ----------------------------------------------------------
+    @torch.no_grad()
+    def collect_rollouts(self, demonstrator, demos=None, decision_threshold=None):
+        if demos is None:
+            demos = demonstrator.train_demos
+        return collect_rollouts(
+            policy=self.policy,
+            demonstrator=demonstrator,
+            demos=demos,
+            metrics_list=self.metrics_list,
+            sample_actions_fn=self._sample_actions_from_probs,
+            decision_threshold=decision_threshold,
+            before_demo=None,
+        )
+
+    @torch.no_grad()
+    def collect_eval_rollouts(self, demonstrator, demos=None, decision_threshold=0.5):
+        if demos is None:
+            demos = demonstrator.test_demos
+        return collect_rollouts(
+            policy=self.policy,
+            demonstrator=demonstrator,
+            demos=demos,
+            metrics_list=self.metrics_list,
+            sample_actions_fn=self._sample_actions_from_probs,
+            decision_threshold=decision_threshold,
+            before_demo=None,
+            require_grad=False,
+            detach_outputs=True,
+        )
     # ----------------------------------------------------------
     def get_state_dict(self):
         """Return dict of policy/value weights for cross-phase transfer."""

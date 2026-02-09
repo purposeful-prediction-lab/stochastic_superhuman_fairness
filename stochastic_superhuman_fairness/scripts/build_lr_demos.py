@@ -29,8 +29,12 @@ def main():
 
     demo = Demonstrator(cfg, auto_create=False, to_torch=not args.no_torch)
     out = demo.create_demos(to_torch=not args.no_torch)
-
+    import ipdb;ipdb.set_trace()
     meta = out.get("metadata", {})
+    try:
+        meta = meta.tolist() # if npz turn to dict
+    except:
+        pass
     print("✅ Done.")
     print(f"dataset={meta.get('dataset')}, demotype={meta.get('demotype')}, "
           f"n_train_demos={meta.get('n_demos_train')}, n_eval_demos={meta.get('n_demos_eval')}")
