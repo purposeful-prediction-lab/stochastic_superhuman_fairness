@@ -34,6 +34,13 @@ class Demonstrator:
 
         if auto_create:
             self.create_demos(to_torch = self.to_torch_flag)
+            self._compute_standalone_demofeats()
+    #----------------------------------------------------------------------
+    def _compute_standalone_demofeats(self):
+        self.train_demo_feats = np.stack([d["fairness_feats"] for d in self.train_demos])  # [D,K]      
+        self.eval_demo_feats = np.stack([d["fairness_feats"] for d in self.eval_demos])  # [D,K]      
+        self.train_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.train_demo_feats)
+        self.eval_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.eval_demo_feats)
     #----------------------------------------------------------------------
     def _resolve_defaults(self):
         dataset_name = self.cfg.demonstrator.dataset.lower()
@@ -418,6 +425,33 @@ class Demonstrator:
         global_metrics = {m: float(np.mean([dm[m] for dm in results])) for m in metrics}
         return {"local": results, "global": global_metrics}
 
+    # -----------------------------------------------------------------
+    # Static Methods
+    # -----------------------------------------------------------------
+    @staticmethod
+    def compute_sorted_demo_means(demos: np.ndarray) -> np.ndarray:
+        """
+        Given unsorted demos (D,K), compute per-feature sorted cumulative means.
+
+        For each feature k:
+          - sort demos[:,k] ascending -> v
+          - means[:,k] = cumsum(v) / (1..D)
+
+        Returns
+        -------
+        means : (D,K) ndarray
+            Column k is the cumulative mean of the sorted demo values for feature k.
+            Each column is nondecreasing.
+        """
+        x = np.asarray(demos, dtype=float)
+        if x.ndim != 2:
+            raise ValueError("demos must be a 2D array of shape (D, K).")
+
+        # sort each column independently
+        xs = np.sort(x, axis=0)                         # (D,K)
+        cumsum = np.cumsum(xs, axis=0)                  # (D,K)
+        denom = np.arange(1, xs.shape[0] + 1)[:, None]  # (D,1)
+        return cumsum / denom
     # -----------------------------------------------------------------
     # Learning Inteface
     # -----------------------------------------------------------------

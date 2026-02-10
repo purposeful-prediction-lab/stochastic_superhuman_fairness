@@ -99,13 +99,15 @@ def main():
     feature_names = getattr(model, "metrics_list", None)
     title = f"{os.path.basename(args.archive)} | split={args.split} | R={n_rollouts} D={len(demos_all)}"
 
+    alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
+    import ipdb;ipdb.set_trace()
     fig, _axes = plot_rollouts_vs_demos(
         rollouts=rollout_feats,
         demos=demo_feats,
         feature_names=feature_names,
         pairs=pairs,
         title=title,
-        alpha=1,
+        alpha=alpha,
         beta=None,
         return_artists=False,
     )

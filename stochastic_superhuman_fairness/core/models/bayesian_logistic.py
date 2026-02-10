@@ -129,11 +129,13 @@ class BayesianLogisticRegressionModel(StochasticParamDistMixin, LogisticRegressi
         # ----------------------------------------------------
         # 2) Subdominance matrix
         # ----------------------------------------------------
+        self.compute_alpha(rollout_feats, demonstrator.train_demo_means_sorted, mode = self.subdom_mode)
+        #  import ipdb;ipdb.set_trace()
         S = compute_subdominance_matrix(
             rollout_feats,
             demo_feats,
             mode=self.subdom_mode,
-            alpha=self.compute_alpha(),
+            alpha=self.alpha,
             beta=self.compute_beta(),
         )
 

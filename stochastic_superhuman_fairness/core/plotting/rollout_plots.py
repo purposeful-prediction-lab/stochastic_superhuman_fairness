@@ -90,7 +90,7 @@ def plot_rollouts_vs_demos_old(
         )
 
         if alpha_v is not None:
-            ax.axvline(alpha_v[j])
+            ax.axvline(alpha_v[j], color = 'red')
         if beta_v is not None:
             ax.axhline(beta_v[i])
 

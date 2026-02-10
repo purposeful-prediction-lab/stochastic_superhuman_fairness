@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Literal, Optional, Tuple, Dict
+from typing import Literal, Optional, Tuple, Dict, Union
 
 try:
     import torch
@@ -65,7 +65,8 @@ def _broadcast_params(alpha, beta, K, like):
             arr = np.ones(K, dtype=np.asarray(p).dtype)*float(p); return arr
         p = _to_backend(p, like)
         p = p.reshape(-1)
-        if p.size != K: raise ValueError(f"alpha/beta must have {K} elements, got {p.size}")
+        #  import ipdb;ipdb.set_trace()
+        if p.size()[0] != K: raise ValueError(f"alpha/beta must have {K} elements, got {p.size()}")
         return p
 
     a = _prep(alpha); b = _prep(beta)
@@ -209,17 +210,110 @@ def subdominance_loss_from_features(
 
 
 # ---------- placeholders for parameter learning (alpha/beta) ----------
+def compute_alpha_sorted_demos(
+    rollouts, demos_sorted, beta, *,
+    mode: str = "absolute",
+    alpha_max: float = 100.0,
+    eps: float = 1e-12,
+    fr=None,
+):
+    like = rollouts
+    r = _to_backend(rollouts, np.empty((), np.float64))
+    d = _to_backend(demos_sorted, np.empty((), np.float64))
+    if r.ndim != 2 or d.ndim != 2 or r.shape[1] != d.shape[1]:
+        raise ValueError("rollouts and demos_sorted must be 2D with same K.")
 
-def compute_alpha(rollout_feats, demo_feats, mode: Mode = "absolute"):
-    """
-    Placeholder for closed-form alpha based on rollout and demo features.
-    Must return shape [K] (vector) matching feature dimensionality.
-    For now, returns ones.
-    """
-    like = rollout_feats
-    K = rollout_feats.shape[-1]
-    return _to_backend(np.ones((K,), dtype=np.float32), like)
+    K, D = r.shape[1], d.shape[0]
+    b = np.full(K, float(beta)) if np.isscalar(beta) else np.asarray(beta, float).reshape(-1)
+    if b.size != K: raise ValueError(f"beta must be scalar or length-K (K={K}). Got {b.size}.")
+    fr = np.nanmean(r, 0) if fr is None else np.asarray(fr, float).reshape(-1)
+    if fr.size != K: raise ValueError(f"fr must be length-K (K={K}). Got {fr.size}.")
+    rel = (mode.lower() == "relative")
+    if not rel and mode.lower() != "absolute": raise ValueError("mode must be 'absolute' or 'relative'.")
 
+    a = np.full(K, float(alpha_max))
+    for k in range(K):
+        i = np.searchsorted(d[:, k], fr[k], side="right")
+        if i >= D: continue
+        fd, frk = d[i, k], fr[k]
+        denom = (1.0 - fd / (frk + 1e-6)) if rel else (fd - frk)
+        if denom > eps: a[k] = min(alpha_max, b[k] / denom)
+
+    return _to_backend(a, like)
+
+def compute_sorted_demo_means(demos, *, means_mode: str = "identity"):
+    """
+    Returns demos_means_sorted: (D,K) sorted ascending per column.
+
+    means_mode:
+      - "identity": treat demos as already (D,K) means; just sort per column
+      - "cumulative": interpret demos as (N,K) samples; build cumulative means
+                      after sorting rows by ||row|| (magnitude):
+                        m[t] = mean(rows_sorted[:t+1], axis=0)
+                      then sort each column of m ascending (to satisfy searchsorted usage)
+    """
+    x = _to_backend(demos, np.empty((), np.float64))  # force numpy for processing
+    if x.ndim != 2:
+        raise ValueError("demos must be 2D (N,K) or (D,K).")
+
+    means_mode = means_mode.lower()
+    if means_mode == "identity":
+        m = x
+    elif means_mode == "cumulative":
+        order = np.argsort(np.linalg.norm(x, axis=1))
+        xs = x[order]
+        m = np.cumsum(xs, axis=0) / (np.arange(xs.shape[0])[:, None] + 1.0)
+    else:
+        raise ValueError("means_mode must be 'identity' or 'cumulative'.")
+
+    # sort each feature column ascending (required by np.searchsorted usage)
+    return np.sort(m, axis=0)
+
+
+def compute_alpha(
+    rollouts: Union[np.ndarray, torch.Tensor],
+    demos: Union[np.ndarray, torch.Tensor],
+    beta,
+    *,
+    demos_are_sorted_means: bool | None = None,
+    means_mode: str = "identity",
+    mode: str = "absolute",          # passed through to compute_alpha_sorted_demos
+    alpha_max: float = 100.0,
+    eps: float = 1e-12,
+    fr=None,
+):
+    """
+    Wrapper:
+      - If demos is already sorted mean demos: use it directly.
+      - Else: compute + sort demo means, then call compute_alpha_sorted_demos.
+
+    rollouts/demos can be numpy arrays or torch tensors.
+    alpha returned matches backend/dtype/device of `rollouts` via _to_backend.
+    """
+    like = rollouts
+
+    # decide whether demos is already "sorted mean demos"
+    if demos_are_sorted_means is None:
+        d_np = _to_backend(demos, np.empty((), np.float64))
+        # heuristic: check monotone nondecreasing per column
+        demos_are_sorted_means = bool(np.all(np.diff(d_np, axis=0) >= 0))
+
+    demos_sorted = (
+        _to_backend(demos, np.empty((), np.float64))
+        if demos_are_sorted_means
+        else compute_sorted_demo_means(demos, means_mode=means_mode)
+    )
+
+    # call the alpha core (it returns in backend of rollouts already)
+    return compute_alpha_sorted_demos(
+        rollouts,
+        demos_sorted,
+        beta,
+        mode=mode,
+        alpha_max=alpha_max,
+        eps=eps,
+        fr=fr,
+    )
 
 def compute_beta(rollout_feats, demo_feats, mode: Mode = "absolute"):
     """

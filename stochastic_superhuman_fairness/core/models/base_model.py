@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from abc import ABC, abstractmethod
 from stochastic_superhuman_fairness.core.rollout_utils import collect_rollouts, RolloutBatch
+from stochastic_superhuman_fairness.core.fairness.subdominance import compute_alpha
 from stochastic_superhuman_fairness.core.models.utils import (
     phi_features,
 )
@@ -161,9 +162,13 @@ class BaseModel(ABC, nn.Module):
 
         return metrics_list
 
-    def compute_alpha(self):
+    def compute_alpha(self, rollouts, demos, beta = None, mode: str = 'absolute', update_self_alpha: bool = True):
         """Placeholder – later: learn alpha per fairness dimension."""
-        return None  # triggers default α = ones(K)
+        beta = self.beta if beta is None else beta
+        alpha =  compute_alpha(rollouts, demos, beta, mode = mode)
+        if update_self_alpha:
+            self.alpha =  alpha
+        return alpha
 
     def compute_beta(self):
         """Placeholder – later: learn beta per fairness dimension."""

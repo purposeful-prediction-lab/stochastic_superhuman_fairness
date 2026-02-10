@@ -93,11 +93,13 @@ def annotate_mean_with_guides(
         [mean_x, xmax], [mean_y, mean_y],
         linestyle="-", linewidth=guide_lw,
         zorder=zorder - 1,
+        color = 'red',
     )[0]
     v_guide = ax.plot(
         [mean_x, mean_x], [mean_y, ymax],
         linestyle="-", linewidth=guide_lw,
         zorder=zorder - 1,
+        color = 'red',
     )[0]
 
     return mean_artist, v_guide, h_guide
@@ -116,7 +118,7 @@ def annotate_inverse_alpha_arrows(
     pad_frac: float = 0.06,
     offset_frac: float = 0.03,
     lw: float = 1.4,
-    arrow_ls: str = ":",
+    arrow_ls: str = "-",
     text_fs: int = 9,
     zorder: int = 6,
 ) -> Dict[str, Any]:
@@ -148,11 +150,13 @@ def annotate_inverse_alpha_arrows(
     # ---------- Alpha rays (origin = inv-alpha point) ----------
     alpha_h = ax.plot(
         [inv_alpha_x, xmax], [inv_alpha_y, inv_alpha_y],
-        lw=lw, zorder=zorder
+        lw=lw, zorder=zorder, color = 'red',
+        linestyle = 'dashed',
     )[0]
     alpha_v = ax.plot(
         [inv_alpha_x, inv_alpha_x], [inv_alpha_y, ymax],
-        lw=lw, zorder=zorder
+        lw=lw, zorder=zorder, color = 'red',
+        linestyle = 'dashed',
     )[0]
 
     # ---------- Offset dotted <-> arrows ----------
