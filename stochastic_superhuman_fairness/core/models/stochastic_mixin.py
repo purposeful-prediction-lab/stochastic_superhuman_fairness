@@ -86,6 +86,7 @@ class StochasticParamDistMixin:
 
     @torch.no_grad()
     def sample_dist(self, mode: DistMode, **cfg) -> Tuple[Dict[str, torch.Tensor], dict]:
+        #  import ipdb;ipdb.set_trace()
         if mode == "per_param_diag":
             return self._sample_per_param_diag(**cfg)
         if mode == "full_param_mvn":
@@ -115,6 +116,8 @@ class StochasticParamDistMixin:
             state["full_mu"] = self.full_mu.detach().cpu()
             state["full_Sigma"] = self.full_Sigma.detach().cpu()
 
+        #  import ipdb;ipdb.set_trace()
+        state["full_template"] = {k: v.detach().cpu() for k, v in self.full_template.items()}
         return state
 
     @torch.no_grad()
@@ -123,6 +126,7 @@ class StochasticParamDistMixin:
             return
         mode = state.get("mode", None)
 
+        self.full_template = {k: v.to(device) for k, v in state["full_template"].items()}
         if mode == "per_param_diag":
             self.per_param_mean = {k: v.to(device) for k, v in state["per_param_mean"].items()}
             self.per_param_var  = {k: v.to(device) for k, v in state["per_param_var"].items()}
@@ -267,6 +271,7 @@ class StochasticParamDistMixin:
         z = torch.randn_like(self.full_mu)
         theta_vec = self.full_mu + L @ z
 
+        #  import ipdb;ipdb.set_trace()
         theta = self._unflatten_to_theta_dict(theta_vec, self.full_template, self.full_names)
         return theta, {"theta_vec": theta_vec, "z": z} if store_z else {"theta_vec": theta_vec}
 

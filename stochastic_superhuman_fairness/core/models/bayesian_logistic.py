@@ -169,6 +169,7 @@ class BayesianLogisticRegressionModel(StochasticParamDistMixin, LogisticRegressi
         # ----------------------------------------------------
         # 5) Update distribution
         # ----------------------------------------------------
+        #  import ipdb;ipdb.set_trace()
         if dist_mode == "per_param_diag":
             self.update_dist(
                 "per_param_diag",
