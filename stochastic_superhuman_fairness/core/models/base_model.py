@@ -162,10 +162,12 @@ class BaseModel(ABC, nn.Module):
 
         return metrics_list
 
-    def compute_alpha(self, rollouts, demos, beta = None, mode: str = 'absolute', update_self_alpha: bool = True):
+    def compute_alpha(self, rollouts, demos, beta = None, 
+                      mode: str = 'absolute', update_self_alpha: bool = True, alpha_max: float = 10.0, reduce: str = 'mean',
+        ):
         """Placeholder – later: learn alpha per fairness dimension."""
         beta = self.beta if beta is None else beta
-        alpha =  compute_alpha(rollouts, demos, beta, mode = mode)
+        alpha =  compute_alpha(rollouts, demos, beta, mode = mode, alpha_max = alpha_max, reduce = reduce)
         if update_self_alpha:
             self.alpha =  alpha
         return alpha

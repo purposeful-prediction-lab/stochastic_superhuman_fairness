@@ -210,37 +210,83 @@ def subdominance_loss_from_features(
 
 
 # ---------- placeholders for parameter learning (alpha/beta) ----------
-def compute_alpha_sorted_demos(
-    rollouts, demos_sorted, beta, *,
-    mode: str = "absolute",
-    alpha_max: float = 100.0,
+def compute_alpha(
+    rollouts,
+    demos,
+    beta,
+    *,
+    mode: str = "absolute",       # "absolute" | "relative"
+    reduce: str = "none",         # "none" | "mean" | "median"
+    means_mode: str = "identity", # passed to compute_sorted_demo_means if demos not already sorted
+    alpha_max: float = 10.0,
     eps: float = 1e-12,
-    fr=None,
+    sorted_check_eps: float = 0.0,
 ):
+    """
+    Compute per-rollout alpha.
+
+    Accepts EITHER:
+      - demos as already-sorted demo means (D,K) with each column nondecreasing, OR
+      - raw/unsorted demos (D,K) (or (N,K) if means_mode="cumulative").
+
+    If demos is not nondecreasing per column, we compute sorted demo means via:
+        demos_sorted = compute_sorted_demo_means(demos, means_mode=means_mode)
+
+    For each rollout r and feature k:
+      fr = rollouts[r,k]
+      fd = first demos_sorted[:,k] with fd > fr
+      alpha[r,k] = min(alpha_max, beta_k / denom)
+        denom = fd - fr                          (mode="absolute")
+        denom = 1 - fd/(fr + 1e-6)               (mode="relative")
+      If no fd or denom <= eps -> alpha_max.
+
+    Returns:
+      reduce="none"   -> (R,K)
+      reduce="mean"   -> (K,)
+      reduce="median" -> (K,)
+
+    Inputs can be numpy or torch; output matches backend/dtype/device of rollouts.
+    """
     like = rollouts
     r = _to_backend(rollouts, np.empty((), np.float64))
-    d = _to_backend(demos_sorted, np.empty((), np.float64))
+    d = _to_backend(demos,    np.empty((), np.float64))
     if r.ndim != 2 or d.ndim != 2 or r.shape[1] != d.shape[1]:
-        raise ValueError("rollouts and demos_sorted must be 2D with same K.")
+        raise ValueError("rollouts and demos must be 2D with same K.")
 
-    K, D = r.shape[1], d.shape[0]
+    # infer if already sorted per column
+    if not bool(np.all(np.diff(d, axis=0) >= -sorted_check_eps)):
+        d = compute_sorted_demo_means(d, means_mode=means_mode)
+
+    R, K = r.shape
+    D = d.shape[0]
+
     b = np.full(K, float(beta)) if np.isscalar(beta) else np.asarray(beta, float).reshape(-1)
-    if b.size != K: raise ValueError(f"beta must be scalar or length-K (K={K}). Got {b.size}.")
-    fr = np.nanmean(r, 0) if fr is None else np.asarray(fr, float).reshape(-1)
-    if fr.size != K: raise ValueError(f"fr must be length-K (K={K}). Got {fr.size}.")
+    if b.size != K:
+        raise ValueError(f"beta must be scalar or length-K (K={K}). Got {b.size}.")
+
     rel = (mode.lower() == "relative")
-    if not rel and mode.lower() != "absolute": raise ValueError("mode must be 'absolute' or 'relative'.")
+    if not rel and mode.lower() != "absolute":
+        raise ValueError("mode must be 'absolute' or 'relative'.")
 
-    a = np.full(K, float(alpha_max))
+    a = np.full((R, K), float(alpha_max), dtype=float)
     for k in range(K):
-        i = np.searchsorted(d[:, k], fr[k], side="right")
-        if i >= D: continue
-        fd, frk = d[i, k], fr[k]
-        denom = (1.0 - fd / (frk + 1e-6)) if rel else (fd - frk)
-        if denom > eps: a[k] = min(alpha_max, b[k] / denom)
+        fr = r[:, k]
+        idx = np.searchsorted(d[:, k], fr, side="right")
+        ok = idx < D
+        if not np.any(ok): 
+            continue
+        fd = d[np.clip(idx, 0, D - 1), k]
+        denom = (1.0 - fd / (fr + 1e-6)) if rel else (fd - fr)
+        good = ok & (denom > eps)
+        if np.any(good):
+            a[good, k] = np.minimum(alpha_max, b[k] / denom[good])
 
-    return _to_backend(a, like)
+    red = reduce.lower()
+    out = a if red == "none" else (np.nanmean(a, 0) if red == "mean" else np.nanmedian(a, 0) if red == "median" else None)
+    if out is None:
+        raise ValueError("reduce must be 'none', 'mean', or 'median'.")
 
+    return _to_backend(out, like)
 def compute_sorted_demo_means(demos, *, means_mode: str = "identity"):
     """
     Returns demos_means_sorted: (D,K) sorted ascending per column.
@@ -269,51 +315,6 @@ def compute_sorted_demo_means(demos, *, means_mode: str = "identity"):
     # sort each feature column ascending (required by np.searchsorted usage)
     return np.sort(m, axis=0)
 
-
-def compute_alpha(
-    rollouts: Union[np.ndarray, torch.Tensor],
-    demos: Union[np.ndarray, torch.Tensor],
-    beta,
-    *,
-    demos_are_sorted_means: bool | None = None,
-    means_mode: str = "identity",
-    mode: str = "absolute",          # passed through to compute_alpha_sorted_demos
-    alpha_max: float = 100.0,
-    eps: float = 1e-12,
-    fr=None,
-):
-    """
-    Wrapper:
-      - If demos is already sorted mean demos: use it directly.
-      - Else: compute + sort demo means, then call compute_alpha_sorted_demos.
-
-    rollouts/demos can be numpy arrays or torch tensors.
-    alpha returned matches backend/dtype/device of `rollouts` via _to_backend.
-    """
-    like = rollouts
-
-    # decide whether demos is already "sorted mean demos"
-    if demos_are_sorted_means is None:
-        d_np = _to_backend(demos, np.empty((), np.float64))
-        # heuristic: check monotone nondecreasing per column
-        demos_are_sorted_means = bool(np.all(np.diff(d_np, axis=0) >= 0))
-
-    demos_sorted = (
-        _to_backend(demos, np.empty((), np.float64))
-        if demos_are_sorted_means
-        else compute_sorted_demo_means(demos, means_mode=means_mode)
-    )
-
-    # call the alpha core (it returns in backend of rollouts already)
-    return compute_alpha_sorted_demos(
-        rollouts,
-        demos_sorted,
-        beta,
-        mode=mode,
-        alpha_max=alpha_max,
-        eps=eps,
-        fr=fr,
-    )
 
 def compute_beta(rollout_feats, demo_feats, mode: Mode = "absolute"):
     """
