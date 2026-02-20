@@ -82,7 +82,7 @@ class Logger:
             tag = f"[→ PHASE {record['phase']}: {record['algo'].upper()}]"
         else:
             tag = "[LOG]"
-        msg = f"{tag} { {k:v for k,v in record.items() if k not in ['time','algo','epoch','phase']} }"
+        msg = f"\n{tag} { {k:v for k,v in record.items() if k not in ['time','algo','epoch','phase']} }"
         print(msg)
 
     # ----------------------------------------------------------
@@ -123,7 +123,7 @@ class Logger:
             "timestamp": datetime.now().isoformat(),
             "format_version": 1,
         }
-        import ipdb;ipdb.set_trace()
+        #  import ipdb;ipdb.set_trace()
         # --- write zip ---
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             # model weights (tensors only → safe)

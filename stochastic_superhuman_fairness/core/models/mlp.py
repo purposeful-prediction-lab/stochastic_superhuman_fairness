@@ -12,7 +12,6 @@ from stochastic_superhuman_fairness.core.fairness.subdominance import (
     subdominance_loss_from_features,
 )
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features
-#  from stochastic_superhuman_fairness.core.fairness.compute_fairness_utils import compute_fairness_features
 
 
 class MLPModel(BaseModel):

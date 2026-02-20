@@ -1,12 +1,18 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import numpy as np
 from abc import ABC, abstractmethod
 from stochastic_superhuman_fairness.core.rollout_utils import collect_rollouts, RolloutBatch
 from stochastic_superhuman_fairness.core.fairness.subdominance import compute_alpha
 from stochastic_superhuman_fairness.core.models.utils import (
     phi_features,
 )
+from stochastic_superhuman_fairness.core.fairness.subdominance import (
+    subdominance_loss_from_features,
+    compute_subdominance_matrix,
+)
+from stochastic_superhuman_fairness.core.fairness.compute_fairness_utils import compute_fairness_features
 from core.utils import flatten_dict
 
 class BaseModel(ABC, nn.Module):
@@ -68,7 +74,8 @@ class BaseModel(ABC, nn.Module):
             return self.train_one_epoch_standard(demonstrator, **tkwargs)
         elif subdom_type == "bayesian":
             flattened_tkwargs = flatten_dict(kwargs, keep_path = False)
-            return self.train_one_epoch_stochastic_bayesian(demonstrator, **flattened_tkwargs)
+            return self.train_one_epoch_stochastic_bayesian(demonstrator, no_update = False, **flattened_tkwargs)
+            #  return self.train_one_epoch_stochastic_bayesian_dummy(demonstrator, **flattened_tkwargs)
         else:
             raise ValueError(f"Unknown training mode '{self.cfg.subdom_mode}'")
 
@@ -236,3 +243,62 @@ class BaseModel(ABC, nn.Module):
                 Tensor [F] of mean φ(x, ŷ) for the batch.
             """
             return self.phi_mean_per_demo(demos, add_bias = add_bias, stochastic = stochastic).mean(axis=0)
+
+
+    def evaluate(self, demonstrator, y_domain="01"):
+            """
+            Vectorized evaluation over all evaluation demos.
+            Returns metrics prefixed with 'eval/' for consistency.
+            """
+            demonstrator.to_torch(self.device)
+
+            #  import ipdb;ipdb.set_trace()
+            if not demonstrator.eval_demos:
+                return {
+                    "eval/zero_one_loss": None,
+                    "eval/mean_subdom": None,
+                    "eval/std_subdom": None,
+                    "eval/fairness": None,
+                }
+
+            # ---- Precompute reference demo fairness ----
+            f_train = torch.as_tensor(
+                np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
+                dtype=torch.float32, device=self.device
+            )
+
+            # ---- Concatenate all eval demos ----
+            Xe = torch.cat([d["X"] for d in demonstrator.eval_demos], dim=0)
+            ye = torch.cat([d["y"] for d in demonstrator.eval_demos], dim=0)
+            Ae = torch.cat([d["A"] for d in demonstrator.eval_demos], dim=0)
+
+            with torch.no_grad():
+                logits = self.policy(Xe).squeeze(-1)
+                y_hat = torch.sigmoid(logits)
+                ye = ye.view_as(y_hat)
+                zero_one_loss = self.zero_one_loss(y_hat, ye)
+
+                # Compute fairness features for eval data
+                f_eval = compute_fairness_features(Xe, ye, y_hat, Ae, metrics=self.metrics_list)
+
+                # Subdominance relative to training demos
+                subdom_out = subdominance_loss_from_features(
+                    rollout_feats=f_eval[None, :],
+                    demo_feats=f_train,
+                    mode=self.subdom_mode,
+                    agg=self.subdom_agg,
+                    alpha=self.alpha,
+                    beta=self.beta,
+                    reduction="none",
+                )
+                S = subdom_out["S"].squeeze(0)
+                mean_subdom = float(S.mean().item())
+                std_subdom = float(S.std().item())
+
+            zero_one_val = float(zero_one_loss.item()) if zero_one_loss is not None else np.nan
+            return {
+                "eval/zero_one_loss": zero_one_val,
+                "eval/mean_subdom": float(mean_subdom) if mean_subdom is not None else np.nan,
+                "eval/std_subdom": float(std_subdom) if std_subdom is not None else np.nan,
+                "eval/fairness": f_eval.detach().cpu().numpy().tolist() if f_eval is not None else [],
+            }

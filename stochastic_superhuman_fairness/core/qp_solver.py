@@ -1,16 +1,14 @@
-
 import torch
 import numpy as np
 import mosek
 import matplotlib.pyplot as plt
+from stochastic_superhuman_fairness.core.utils import minmax_normalize
 
 def prepare_subdom_cost(
     S: np.ndarray,
-    debias_rowcol: bool = True,
     normalize: bool = True,
     tau: float = 1.0,
     adaptive_tau: bool = True,
-    target_std: float = 5.0,
     max_tau: float = 1000.0,
     tol_gamma_std: float = 0.03,
     solver_fn=None,                 # optional: callable returning γ for diagnostics
@@ -25,16 +23,12 @@ def prepare_subdom_cost(
     ----------
     S : np.ndarray
         Raw subdominance matrix (num_samples × num_demos).
-    debias_rowcol : bool
-        Remove additive A_i + B_j structure.
     normalize : bool
         Center and scale to 0 mean, unit std.
     tau : float
         Initial temperature (contrast multiplier).
     adaptive_tau : bool
         If True, increase τ until γ becomes sufficiently non-uniform.
-    target_std : float
-        Target standard deviation for the cost after τ scaling.
     max_tau : float
         Upper bound for adaptive τ.
     tol_gamma_std : float
@@ -55,36 +49,22 @@ def prepare_subdom_cost(
         Final temperature used (after adaptive tuning).
     """
 
-    S = np.asarray(S, dtype=float)
+    S_scaled = np.asarray(S, dtype=float)
     if verbose:
         print(f"[prepare_subdom_cost] input mean/std = {S.mean():.3f}/{S.std():.3f}")
 
     # ------------------------------------------------------------
-    # 1️⃣  Remove additive row/column bias
-    # ------------------------------------------------------------
-    if debias_rowcol:
-        row_mean = S.mean(axis=1, keepdims=True)
-        col_mean = S.mean(axis=0, keepdims=True)
-        grand_mean = S.mean()
-        S = S - row_mean - col_mean + grand_mean
-        if verbose:
-            print(f"[prepare_subdom_cost] debiased mean/std = {S.mean():.3f}/{S.std():.3f}")
-
-    # ------------------------------------------------------------
-    # 2️⃣  Normalize
+    # 2️⃣  Normalizee
     # ------------------------------------------------------------
     if normalize:
-        std = S.std()
-        if std < 1e-8:
-            std = 1.0
-        S = (S - S.mean()) / std
+        S_scaled = minmax_normalize(S)
         if verbose:
             print(f"[prepare_subdom_cost] normalized mean/std = {S.mean():.3f}/{S.std():.3f}")
 
     # ------------------------------------------------------------
     # 3️⃣  Apply temperature scaling (initial τ)
     # ------------------------------------------------------------
-    S_scaled = S * tau
+    S_scaled = S_scaled * tau
     if verbose:
         print(f"[prepare_subdom_cost] applied initial τ={tau:.2f} → mean/std = {S_scaled.mean():.3f}/{S_scaled.std():.3f}")
 
@@ -115,15 +95,11 @@ def prepare_subdom_cost(
             if verbose:
                 print(f"[τ-tune] final τ={final_tau:.2f} achieved γ.std={gamma_std:.4f}")
 
-        S_scaled = S * final_tau
-
-    # Optional: rescale to target_std (e.g. 5.0)
-    if target_std is not None and target_std > 0:
-        S_scaled = (S_scaled - S_scaled.mean()) / (S_scaled.std() + 1e-8) * target_std
+        S_scaled = minmax_normalize(S)
+        S_scaled = S_scaled * final_tau
 
     if verbose:
         print(f"[prepare_subdom_cost] final mean/std = {S_scaled.mean():.3f}/{S_scaled.std():.3f}")
-
     return S_scaled, final_tau
 
 
@@ -180,13 +156,9 @@ def _solve_qp_mosek_core(
     S = np.asarray(subdom_matrix, dtype=float)
     num_samples, num_demos = S.shape
     n = num_samples * num_demos
-
     # --- Scaling ---
     if normalize_subdom:
-        std = S.std()
-        if std < 1e-8:
-            std = 1.0
-        S = (S - S.mean()) / std
+        S = minmax_normalize(S)
     if tau != 1.0:
         S = S * tau
     if lambda_reg is None:
@@ -269,6 +241,9 @@ def _solve_qp_mosek_core(
         gamma = np.zeros(n)
         task.getxx(mosek.soltype.itr, gamma)
         gamma_matrix = gamma.reshape((num_samples, num_demos))
+        if (gamma < 0 ).any():
+            print("Some gamma matrix values were negative; rectifying to 0. Numerical error in very small values? (<1e-6)")
+            gamma_matrix = np.clip(gamma_matrix, a_min=0.0, a_max=None)
         # print("γ column sums:", gamma_matrix.sum(axis=0))
         # print("Target q:", q_demos)
 
@@ -288,6 +263,7 @@ def _solve_qp_mosek_core(
             offset += num_samples
         if col_constraints:
             dual_cols = duals[offset:offset + num_demos]
+
 
     # --- Diagnostics ---
     row_sum = gamma_matrix.sum(axis=1)
@@ -331,9 +307,7 @@ def _solve_sinkhorn_core(
 
     # ---- scale costs (match your MOSEK path) ----
     if normalize_subdom:
-        std = S.std()
-        if std < 1e-8: std = 1.0
-        S = (S - S.mean()) / std
+        S = minmax_normalize(S)
     if tau != 1.0:
         S = S * tau
 
@@ -399,6 +373,10 @@ def _solve_sinkhorn_core(
             break
 
     gamma = (u[:, None] * K) * v[None, :]
+    #  import ipdb;ipdb.set_trace()
+    if (gamma < 0 ).any():
+        print("Some gamma matrix values were negative; rectifying to 0. Numerical error in very small values? (<1e-6)")
+        gamma = np.clip(gamma, a_min=0.0, a_max=None)
 
     # Optional global renormalization: makes Γ a probability table even if unconstrained
     if renormalize_gamma:
@@ -516,11 +494,9 @@ def solve_stochastic_subdom_coupling(
     S,
     solver="mosek",
     rollout_marginals=None,
-    debias_rowcol=True,
-    normalize=True,
+    normalize_subdom=True,
     tau=1.0,
     adaptive_tau=False,
-    target_std=5.0,
     max_tau=1000.0,
     tol_gamma_std=0.03,
     row_constraints=True,
@@ -555,11 +531,9 @@ def solve_stochastic_subdom_coupling(
 
     S_pre, final_tau = prepare_subdom_cost(
         S_np,
-        debias_rowcol=debias_rowcol,
-        normalize=normalize,
+        normalize=normalize_subdom,
         tau=tau,
         adaptive_tau=adaptive_tau,
-        target_std=target_std,
         max_tau=max_tau,
         tol_gamma_std=tol_gamma_std,
         solver_fn=solve_qp_superhuman,
@@ -569,11 +543,11 @@ def solve_stochastic_subdom_coupling(
 
     # ---- Solve QP/OT ----
     gamma_np, dual_rows_np, dual_cols_np = solve_qp_superhuman(
-        subdom_matrix=S_pre,
+        subdom_matrix=S_np,
         rollout_marginals=rollout_marginals,
         solver=solver,
         lambda_reg=lambda_reg,
-        normalize_subdom=False,
+        normalize_subdom=normalize_subdom,
         tau=1.0,
         epsilon=epsilon,
         row_constraints=row_constraints,

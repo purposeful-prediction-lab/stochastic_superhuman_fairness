@@ -78,6 +78,95 @@ def _broadcast_params(alpha, beta, K, like):
 def compute_subdominance_matrix(
     rollout_feats,              # [R, K]
     demo_feats,                 # [D, K]
+    mode: str = "absolute",
+    alpha=None,                 # scalar, [K], or [R,K]
+    beta=None,                  # scalar, [K], or [R,K] (optional)
+    eps: float = 1e-12,
+):
+    """
+    Compute pairwise subdominance S[r, d] between rollout r and demo d for K features.
+
+    Accepts:
+      - alpha: scalar, (K,), or (R,K) where alpha[r,:] applies to rollout r
+      - beta : scalar, (K,), or (R,K) similarly (if you want per-rollout offsets)
+
+    absolute:  S = ReLU( alpha * (f_r - f_d) + beta ) summed over K
+    relative:  S = ReLU( alpha * ((f_r / f_d) - 1) + beta ) summed over K
+
+    Inputs may be torch tensors or numpy arrays; output matches the backend of rollout_feats.
+    """
+    like = rollout_feats
+    rf = _to_backend(rollout_feats, like)   # [R,K]
+    df = _to_backend(demo_feats, like)      # [D,K]
+
+    R, K = rf.shape
+    D, Kd = df.shape
+    if Kd != K:
+        raise ValueError(f"Feature dimensions must match, got K={K} vs Kd={Kd}.")
+
+    is_torch = _is_tensor(rf)
+
+    def _as_backend(x):
+        return _to_backend(x, rf) if x is not None else None
+
+    def _broadcast_param(p, name):
+        # default
+        if p is None:
+            if is_torch:
+                import torch
+                p = torch.ones(K, device=rf.device, dtype=rf.dtype)
+            else:
+                p = np.ones(K, dtype=rf.dtype if hasattr(rf, "dtype") else np.float32)
+        p = _as_backend(p)
+
+        # scalar -> (1,1,K)
+        if (is_torch and p.ndim == 0) or ((not is_torch) and np.isscalar(p)) or( (not is_torch) and np.ndim(p) == 0):
+            return p.reshape(1, 1, 1) * (rf.new_ones((1, 1, K)) if is_torch else np.ones((1, 1, K), dtype=p.dtype))
+
+        # (K,) -> (1,1,K)
+        if p.ndim == 1:
+            if p.shape[0] != K:
+                raise ValueError(f"{name} must be scalar, (K,), or (R,K). Got {p.shape}.")
+            return p.reshape(1, 1, K)
+
+        # (R,K) -> (R,1,K)
+        if p.ndim == 2:
+            if p.shape != (R, K):
+                raise ValueError(f"{name} must be scalar, (K,), or (R,K)={(R,K)}. Got {p.shape}.")
+            return p.reshape(R, 1, K)
+
+        raise ValueError(f"{name} must be scalar, (K,), or (R,K). Got ndim={p.ndim}.")
+
+    alpha3 = _broadcast_param(alpha, "alpha")  # (1,1,K) or (R,1,K)
+    beta3  = _broadcast_param(beta,  "beta")   # (1,1,K) or (R,1,K)
+
+    # Expand features for pairwise ops -> [R, D, K]
+    rf3 = rf[:, None, :]   # [R,1,K]
+    df3 = df[None, :, :]   # [1,D,K]
+
+    if mode == "absolute":
+        core = alpha3 * (rf3 - df3) + beta3
+    elif mode == "relative":
+        if is_torch:
+            import torch
+            denom = torch.clamp(df3, min=eps)
+        else:
+            denom = np.clip(df3, eps, None)
+        core = alpha3 * ((rf3 / denom) - 1.0) + beta3
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    #  import ipdb;ipdb.set_trace()
+    if is_torch:
+        import torch
+        return torch.relu(core).sum(dim=-1)      # [R,D]
+    else:
+        return np.maximum(core, 0.0).sum(axis=-1)  # [R,D]
+
+# -------------------------------------------------------------------------------------
+
+def compute_subdominance_matrix_simple(
+    rollout_feats,              # [R, K]
+    demo_feats,                 # [D, K]
     mode: Mode = "absolute",
     alpha=None,                 # [K] or scalar; default ones (vector of 1s)
     beta=None,                  # [K] or scalar; default ones (vector of 1s)
@@ -280,13 +369,14 @@ def compute_alpha(
         good = ok & (denom > eps)
         if np.any(good):
             a[good, k] = np.minimum(alpha_max, b[k] / denom[good])
-
+        #  import ipdb;ipdb.set_trace()
     red = reduce.lower()
     out = a if red == "none" else (np.nanmean(a, 0) if red == "mean" else np.nanmedian(a, 0) if red == "median" else None)
     if out is None:
         raise ValueError("reduce must be 'none', 'mean', or 'median'.")
 
     return _to_backend(out, like)
+
 def compute_sorted_demo_means(demos, *, means_mode: str = "identity"):
     """
     Returns demos_means_sorted: (D,K) sorted ascending per column.

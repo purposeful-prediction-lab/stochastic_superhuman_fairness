@@ -19,6 +19,7 @@ def main():
     ap.add_argument("--strict", action="store_true")
     ap.add_argument("--no_safe_load", action="store_true")
     ap.add_argument("--summary", action="store_true")
+
     args = ap.parse_args()
 
     os.makedirs(args.target_dir, exist_ok=True)

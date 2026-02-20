@@ -197,6 +197,7 @@ def load_model_from_archive(
     phase_idx: int = 0,
     strict: bool = False,
     use_safe_load: bool = True,
+    overwrite_demos: bool = False,
 ):
     # -------------------------------------------------
     # Open archive (NEW FORMAT ONLY)
@@ -236,10 +237,10 @@ def load_model_from_archive(
 
     if algo not in MODEL_REGISTRY:
         raise KeyError(f"Unknown model type '{algo}'. Available: {list(MODEL_REGISTRY)}")
-
     # -------------------------------------------------
     # Build demonstrator
     # -------------------------------------------------
+    cfg_dict['demonstrator']['overwrite'] = overwrite_demos
     demo = Demonstrator(cfg_dict)
 
     # Attach global fields (mirrors learner behavior)

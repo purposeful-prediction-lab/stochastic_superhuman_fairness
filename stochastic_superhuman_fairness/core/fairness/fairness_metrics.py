@@ -11,49 +11,6 @@ def _safe_mean(arr):
     return np.mean(arr) if len(arr) > 0 else 0.0
 
 # ---------------------------------------------------------------------
-# Custom Cost functions
-# ---------------------------------------------------------------------
-def compute_directional_cost(R_feats, D_feats, n_dir=20):
-    """
-    Computes directional discrepancies before the OT step.
-    R_feats: [R,K]
-    D_feats: [D,K]
-    """
-    R, K = R_feats.shape
-    D = D_feats.shape[0]
-
-    out = {"feature_combinations": {}}
-
-    # -----------------------------------------
-    # (A) All-feature random directions
-    # -----------------------------------------
-    diffs = []
-    for _ in range(n_dir):
-        v = np.random.randn(K)
-        v /= np.linalg.norm(v) + 1e-12
-        r_proj = R_feats @ v
-        d_proj = D_feats @ v
-        diffs.append(np.abs(r_proj.mean() - d_proj.mean()))
-    out["all_features_directional_cost"] = float(np.mean(diffs))
-
-    # -----------------------------------------
-    # (B) 2D feature combinations
-    # -----------------------------------------
-    for i in range(K):
-        for j in range(i+1, K):
-            name = f"f{i}_f{j}"
-            diffs = []
-            for _ in range(n_dir):
-                v = np.random.randn(2)
-                v /= np.linalg.norm(v) + 1e-12
-                r_proj = R_feats[:, [i, j]] @ v
-                d_proj = D_feats[:, [i, j]] @ v
-                diffs.append(np.abs(r_proj.mean() - d_proj.mean()))
-            out["feature_combinations"][name] = float(np.mean(diffs))
-
-    return out
-
-# ---------------------------------------------------------------------
 # Disparity Metrics
 # ---------------------------------------------------------------------
 def demographic_parity(y_pred, a):
@@ -100,6 +57,22 @@ def prediction_error_disparity(y_true, a):
     err0 = 1 - _safe_mean(y_true[a == 0])
     err1 = 1 - _safe_mean(y_true[a == 1])
     return abs(err0 - err1)
+
+# Other Metrics ----------------------------------------------
+def zero_one_loss(y_true, y_pred, *args):
+    """
+    Compute mean zero-one loss (misclassification rate).
+
+    Accepts numpy arrays or torch tensors.
+    Returns float.
+    """
+    if torch.is_tensor(y_true):
+        return float((y_true != y_pred).float().mean().item())
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    return float(np.mean(y_true != y_pred))
+
 
 # ============================================================
 # TORCH VERSIONS (fully differentiable)
@@ -151,6 +124,67 @@ def prediction_error_disparity_torch(y_true, a):
     err1 = 1 - _torch_safe_mean(y_true[a == 1])
     return (err0 - err1).abs()
 
+# Other Metrics ----------------------------------------------
+def zero_one_loss_torch(y_true, y_pred):
+    """
+    Mean zero-one loss (misclassification rate).
+
+    y_true: tensor of shape [N] or [N,1]
+    y_pred: tensor of same shape (either probs or binary)
+    Returns: scalar tensor
+    """
+    # ensure binary predictions
+    if y_pred.dtype.is_floating_point:
+        y_pred = (y_pred > 0.5).float()
+
+    y_true = y_true.float()
+
+    return (y_true != y_pred).float().mean()
+
+# ---------------------------------------------------------------------
+# Custom Cost functions
+# ---------------------------------------------------------------------
+def compute_directional_cost(R_feats, D_feats, n_dir=20):
+    """
+    Computes directional discrepancies before the OT step.
+    R_feats: [R,K]
+    D_feats: [D,K]
+    """
+    R, K = R_feats.shape
+    D = D_feats.shape[0]
+
+    out = {"feature_combinations": {}}
+
+    # -----------------------------------------
+    # (A) All-feature random directions
+    # -----------------------------------------
+    diffs = []
+    for _ in range(n_dir):
+        v = np.random.randn(K)
+        v /= np.linalg.norm(v) + 1e-12
+        r_proj = R_feats @ v
+        d_proj = D_feats @ v
+        diffs.append(np.abs(r_proj.mean() - d_proj.mean()))
+    out["all_features_directional_cost"] = float(np.mean(diffs))
+
+    # -----------------------------------------
+    # (B) 2D feature combinations
+    # -----------------------------------------
+    for i in range(K):
+        for j in range(i+1, K):
+            name = f"f{i}_f{j}"
+            diffs = []
+            for _ in range(n_dir):
+                v = np.random.randn(2)
+                v /= np.linalg.norm(v) + 1e-12
+                r_proj = R_feats[:, [i, j]] @ v
+                d_proj = D_feats[:, [i, j]] @ v
+                diffs.append(np.abs(r_proj.mean() - d_proj.mean()))
+            out["feature_combinations"][name] = float(np.mean(diffs))
+
+    return out
+
+
 # ============================================================
 # UNIFIED BACKEND-AWARE REGISTRY
 # ============================================================
@@ -158,12 +192,12 @@ def prediction_error_disparity_torch(y_true, a):
 def _is_torch(x):
     return torch.is_tensor(x)
 
-
 FAIRNESS_REGISTRY = {
     "D.DP":      (demographic_parity, demographic_parity_torch),
     "D.EqOdds":  (equalized_odds,     equalized_odds_torch),
     "D.PRP":     (predictive_rate_parity, predictive_rate_parity_torch),
     "D.Err":     (prediction_error_disparity, prediction_error_disparity_torch),
+    "L.ZeroOne": (zero_one_loss, zero_one_loss_torch),
 }
 
 
@@ -173,7 +207,7 @@ def compute_fairness_features(y_true, y_pred, a,
     ):
     """
     Automatically picks numpy OR torch implementation.
-    X : is unused, reserved  for any future metrics
+    X : Observations features. Currently unused, reserved  for any future metrics
     Returns a vector of fairness metric values.
     """
     feats = []
@@ -194,6 +228,7 @@ def compute_fairness_features(y_true, y_pred, a,
         return torch.stack(feats)
     else:
         return np.array(feats, dtype=np.float32)
+
 # ---------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------
@@ -202,4 +237,5 @@ METRIC_REGISTRY = {
     "D.EqOdds": equalized_odds,
     "D.PRP": predictive_rate_parity,
     "D.Err": lambda y_true, y_pred, a: prediction_error_disparity(y_true, a),
+    "L.ZeroOne": zero_one_loss,
 }

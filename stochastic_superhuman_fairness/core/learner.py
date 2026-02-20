@@ -13,22 +13,6 @@ from stochastic_superhuman_fairness.core.fairness import subdominance
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, dict_to_ns
 from stochastic_superhuman_fairness.core.models.model_io_utils import validate_schedule
 import torch, numpy as np
-#
-#  MODEL_REGISTRY = {
-#      "logistic": logistic.LogisticRegressionModel,
-#      "mlp": mlp.MLPModel,
-#      "ppo": ppo.PPOModel,
-#      'bayesianlogistic': bayesian_logistic.BayesianLogisticRegressionModel,
-#  }
-
-DEFAULT_PHASE_CFG = {
-    "epochs": 10,
-    "lr": 1e-3,
-    "batch_size": 32,
-    "clip_range": 0.2,
-    "value_coef": 0.5,
-    "entropy_coef": 0.0,
-}
 
 class Learner:
     """
@@ -53,26 +37,6 @@ class Learner:
         #  self.schedule = self._validate_schedule(self.cfg.learner.schedule)
         self.schedule = validate_schedule(self.cfg.learner.schedule, cfg=self.cfg, device=self.device)
 
-    # ------------------------------------------------------------------
-    #  def _validate_schedule(self, schedule, default_learner_cfg: dict = None):
-    #      """Fill missing keys in schedule entries with defaults."""
-    #      validated = []
-    #      default_learner_cfg = self.cfg.get('learner', {}).get('default', {}) if default_learner_cfg is None else default_learner_cfg
-    #      if not schedule:
-    #          raise ValueError("Training schedule missing in config.")
-    #
-    #      for i, phase in enumerate(schedule):
-    #          #  entry = {**DEFAULT_PHASE_CFG, **phase}
-    #          entry = dict_to_ns(default_learner_cfg.copy())
-    #          dict_to_ns(entry).update_from(phase)
-    #          #  dict_to_ns(entry).update_from(dict_to_ns(default_learner_cfg))
-    #          if "algo" not in entry:
-    #              raise ValueError(f"Missing 'algo' in schedule entry {i}")
-    #          entry["algo"] = entry["algo"].lower()
-    #          entry['device'] = self.device
-    #          entry['seed'] = self.cfg.seed
-    #          validated.append(dict_to_ns(entry))
-    #      return validated
     # ----------------------------------------------------------
     def _transfer_parameters(self, old_model, new_model):
         """Transfer policy/value weights between compatible models."""

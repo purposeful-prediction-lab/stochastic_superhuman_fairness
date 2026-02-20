@@ -141,6 +141,14 @@ def normalize_cfg(cfg):
     cfg_dict = OmegaConf.to_container(cfg, resolve=True) if OmegaConf.is_dict(cfg)  else cfg
     return dict_to_ns(cfg_dict)
 
+def minmax_normalize(S):
+    S_min = np.min(S)
+    S_max = np.max(S)
+
+    if S_max == S_min:
+        return np.zeros_like(S)  # avoid division by zero
+
+    return (S - S_min) / (S_max - S_min)
 
 def set_all_seeds(seed: int = 0):
     os.environ["PYTHONHASHSEED"] = str(seed)

@@ -4,9 +4,13 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 
+from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
 from stochastic_superhuman_fairness.core.models.model_io_utils import load_model_from_archive
-from stochastic_superhuman_fairness.core.plotting.rollout_plots import plot_rollouts_vs_demos
-
+from stochastic_superhuman_fairness.core.plotting.rollout_plots import plot_rollouts_vs_demos, plot_zero_one_vs_features_subplots
+from stochastic_superhuman_fairness.core.plotting.aux_plots import plot_subdominance_heatmap, plot_optimal_transport_solution, plot_ot_solution_heatmaps
+from stochastic_superhuman_fairness.core.fairness.subdominance import (
+    compute_subdominance_matrix,
+)
 
 def _parse_pairs(s: str):
     """
@@ -53,7 +57,8 @@ def main():
                     help='Optional pairs like "0,1;0,3;2,4"')
     ap.add_argument("--save_plot_dir", default=None,
                     help="If set, save plot here; otherwise saves next to archive.")
-    ap.add_argument("--out_name", default="rollouts_vs_demos.png")
+    ap.add_argument("--feat_vs_feats_name", default="all_features_vs_features.png")
+    ap.add_argument("--zero_one_vs_feats_name", default="zero_one_vs_features.png")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -64,8 +69,9 @@ def main():
         phase_idx=args.phase,
         strict=False,
         use_safe_load=True,
+        overwrite_demos = False,
     )
-
+    import ipdb;ipdb.set_trace()
     demos_all = demo.train_demos if args.split == "train" else demo.test_demos
     if demos_all is None or len(demos_all) == 0:
         raise RuntimeError(f"No demos found for split={args.split}")
@@ -115,11 +121,47 @@ def main():
     # Save
     save_dir = args.save_plot_dir or os.path.dirname(os.path.abspath(args.archive))
     os.makedirs(save_dir, exist_ok=True)
-    out_path = os.path.join(save_dir, args.out_name)
+    out_path = os.path.join(save_dir, args.feat_vs_feats_name)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    
+    fig, axes = plot_zero_one_vs_features_subplots(
+        rb,
+        demos_all,
+        feature_names=feature_names,
+        alpha=alpha,          # (K,) or (K+1,) if you want y-alpha too
+    )
+    # Save
+    out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print("Saved plot:", out_path)
+
+    S = compute_subdominance_matrix(
+            rollout_feats,
+            demo_feats,
+            mode=model.subdom_mode,
+            alpha=alpha,
+            beta=model.compute_beta(),
+        )
+    fig, axes = plot_subdominance_heatmap(S)
+
+    # Save
+    out_path = os.path.join(save_dir, "Subdominance_heatmap.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-    print("Saved plot:", out_path)
+    out = solve_stochastic_subdom_coupling(
+            S,
+            solver="sinkhorn",
+            weight_method="primal",
+            normalize_subdom=True,
+    )
+    fig, axes = plot_ot_solution_heatmaps(out)
+    # Save
+    out_path = os.path.join(save_dir, "ot_solution.png")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 if __name__ == "__main__":

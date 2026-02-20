@@ -7,8 +7,9 @@ from sklearn.preprocessing import StandardScaler
 from omegaconf import OmegaConf
 from stochastic_superhuman_fairness.core.dataset_utils import load_adult, load_compas
 from stochastic_superhuman_fairness.core.data_defaults import DEFAULT_DATA_CONFIGS
-from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC_REGISTRY
-from stochastic_superhuman_fairness.core.fairness.compute_fairness_utils import compute_fairness_features
+from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC_REGISTRY, zero_one_loss
+#  from stochastic_superhuman_fairness.core.fairness.compute_fairness_utils import compute_fairness_features
+from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict
 
@@ -292,6 +293,7 @@ class Demonstrator:
                 "y": y_i,
                 "A": A_i,
                 "fairness_feats": fairness_feats.detach().cpu().numpy(),
+                "zero_one_loss": zero_one_loss(y_i, y_i)
             })
         return demos
 
@@ -314,7 +316,7 @@ class Demonstrator:
         n = len(X)
 
         if subset_size is None:
-            subset_ratio = 0.2 if subset_ratio is None else float(subset_ratio)
+            subset_ratio = 0.7 if subset_ratio is None else float(subset_ratio)
             subset_size = max(1, int(round(n * subset_ratio)))
 
         subset_size = min(int(subset_size), n)
@@ -336,18 +338,20 @@ class Demonstrator:
 
             lr.fit(X[idx], y[idx])
 
-            y_demo = lr.predict_proba(X)[:, 1].astype(np.float32)  # decisions on full set
+            y_demo = lr.predict_proba(X)[:, 1].astype(np.float32)  # decisions on full set, returns probs
+            #  import ipdb;ipdb.set_trace()
             y_demo_zero_one = (lr.predict_proba(X)[:, 1] >= 0.5).astype(np.float32)
 
             fairness_feats = compute_fairness_features(
-                torch.as_tensor(X, dtype=torch.float32),
-                torch.as_tensor(y, dtype=torch.float32),
+                torch.as_tensor(y, dtype=torch.float32), # y_true
                 torch.as_tensor(y_demo, dtype=torch.float32),
                 torch.as_tensor(A, dtype=torch.float32),
                 metrics=cfg.metrics,
+                X = torch.as_tensor(X, dtype=torch.float32), # Currently unused
             ).detach().cpu().numpy()
 
-            demos.append({"indices": idx, "X": X, "y": y, "A": A, "y_demo": y_demo_zero_one, "fairness_feats": fairness_feats})
+            zero_one = zero_one_loss(y, y_demo_zero_one)
+            demos.append({"indices": idx, "X": X, "y": y, "A": A, "y_demo": y_demo_zero_one, "fairness_feats": fairness_feats, "zero_one_loss": zero_one})
 
         return demos
 

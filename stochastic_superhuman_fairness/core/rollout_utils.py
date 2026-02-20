@@ -1,6 +1,7 @@
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union, Sequence
 from stochastic_superhuman_fairness.core.fairness.compute_fairness_utils import compute_fairness_features
+import numpy as np
 import torch
 
 @dataclass
@@ -8,6 +9,8 @@ class RolloutBatch:
     probs: List[torch.Tensor]
     y_hat: List[torch.Tensor]
     feats: torch.Tensor
+    zero_one_losses: List[torch.Tensor] = None
+    batch_zero_one_loss: float = None
     aux_list: Optional[List[Dict[str, Any]]] = None  # optional extension
     logits: Optional[List[torch.Tensor]] = None  # optional
 # ========================================================================================================================
@@ -20,7 +23,9 @@ def collect_rollouts(
     demos,
     metrics_list,
     sample_actions_fn,                 # (probs, threshold) -> y_hat
+    n_rollouts:int = None,
     decision_threshold: Optional[float] = None,
+    demo_idxs: Union[List, np.ndarray] = None,
     before_demo: Optional[Callable[[int, Dict[str, Any]], Dict[str, Any]]] = None,
     require_grad: bool = False,
     detach_outputs: bool = True,
@@ -46,6 +51,7 @@ def collect_rollouts(
         metrics_list: Fairness metrics to compute per rollout.
         sample_actions_fn: Function mapping probabilities to actions.
         decision_threshold: Optional threshold for deterministic decisions.
+        demo_idxs: Optional demo idxs to get Xs from and pass through policy.
         before_demo: Optional callback executed before each rollout.
                      Should return auxiliary info (or None).
         require_grad: Whether grad computation is enabled or not (i.e for eval or inference)
@@ -63,14 +69,22 @@ def collect_rollouts(
     probs_list, yhat_list, feats_list = [], [], []
     aux_list = [] if before_demo is not None else None
     logits_list = [] if return_logits else None
-
+    zero_one_list = []
+    total_zero_one, total_count = 0., 0.
+    d_idxs = np.arange(len(demos))if demo_idxs is None else demo_idxs 
+    n_rollouts = int(n_rollouts) if n_rollouts is not None else len(demos)
+    
     with ctx:
-        for i, d in enumerate(demos):
+        for i in d_idxs:
+        #  for i, d in enumerate(demos):
+            d = demos[i]
             if before_demo is not None:
                 aux_list.append(before_demo(i, d))
 
             Xd = d["X"].to(device)
-            yd = demonstrator.get_targets(d).to(device)
+            #  yd = demonstrator.get_targets(d).to(device)
+            yt = d['y'].to(device) # ground truth data
+            yd = yt if 'y_demo' not in d.keys() else d['y_demo'].to(device)
             Ad = d["A"]
             Ad = Ad.to(device) if torch.is_tensor(Ad) else Ad
 
@@ -79,26 +93,36 @@ def collect_rollouts(
 
             y_hat = sample_actions_fn(probs, threshold=decision_threshold)
             f_r = compute_fairness_features(Xd, yd, y_hat, Ad, metrics_list)
+            # ---- ZERO-ONE LOSS ----
+            zero_one = (y_hat != yt).float().sum()
+            #  import ipdb;ipdb.set_trace()
+            total_zero_one += zero_one.item()
+            total_count += yt.numel()
 
             if detach_outputs:
                 probs = probs.detach()
                 y_hat = y_hat.detach()
                 f_r = f_r.detach()
+                zone_d = zero_one.detach()
 
             probs_list.append(probs)
             yhat_list.append(y_hat)
             feats_list.append(f_r)
+            zero_one_list.append(zone_d / yt.numel())
+
             if return_logits:
                 logits_list.append(logits)
 
+    batch_zero_one = total_zero_one / max(1, total_count) # zero one loss for the entire batch
     feats = torch.stack(feats_list, dim=0)
-    return RolloutBatch(probs=probs_list, y_hat=yhat_list, feats=feats, aux_list=aux_list)
+    return RolloutBatch(probs=probs_list, y_hat=yhat_list, feats=feats, aux_list=aux_list, zero_one_losses = zero_one_list, batch_zero_one_loss = batch_zero_one)
 
 @torch.no_grad()
 def collect_bayesian_rollouts(
     self,
     demonstrator,
     *,
+    n_rollouts: int = None,
     demos=None,
     dist_mode="per_param_diag",
     decision_threshold=None,
@@ -122,6 +146,7 @@ def collect_bayesian_rollouts(
         demonstrator: Provides targets and sensitive attributes.
         demos: Optional list of demos (defaults to training demos).
         dist_mode: Distribution mode ("per_param_diag" or "full_param_mvn").
+        n_rollouts: how many rollouts to collect. None = num_demos.
         decision_threshold: Optional threshold for action sampling.
         init_if_needed: Whether to initialize the parameter distribution.
         init_var: Initial variance used if distribution is initialized.
@@ -145,6 +170,7 @@ def collect_bayesian_rollouts(
         aux["dist_mode"] = dist_mode
         return aux
 
+    demo_idxs = sample_demo_idxs(len(demos), n_rollouts = n_rollouts, mode = 'cycle')
     rb = collect_rollouts(
         policy=self.policy,
         demonstrator=demonstrator,
@@ -152,6 +178,7 @@ def collect_bayesian_rollouts(
         metrics_list=self.metrics_list,
         sample_actions_fn=self._sample_actions_from_probs,
         decision_threshold=decision_threshold,
+        demo_idxs = demo_idxs,
         before_demo=before_demo,
         require_grad=False,
         detach_outputs=True,
@@ -165,3 +192,59 @@ def collect_bayesian_rollouts(
             self.load_params_into_policy(theta_mean)
 
     return rb
+
+
+def sample_demo_idxs(
+    n_demos: int,
+    n_rollouts: Optional[int] = None,
+    mode: str = "one_per_demo",          # "one_per_demo" | "cycle" | "stochastic"
+    probs: Optional[Sequence[float]] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> np.ndarray:
+    """
+    Returns an int array of demo indices of length n_rollouts (or n_demos if n_rollouts is None).
+
+    Rules:
+      - if n_rollouts is None: return [0,1,...,n_demos-1] (one per demo)
+      - mode="cycle": repeat 0..n_demos-1 until length n_rollouts
+      - mode="stochastic": sample with replacement using probs (default uniform)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if n_demos <= 0:
+        raise ValueError("n_demos must be > 0")
+
+    if n_rollouts is None:
+        return np.arange(n_demos, dtype=int)
+
+    if n_rollouts <= 0:
+        raise ValueError("n_rollouts must be > 0")
+
+    mode = str(mode).lower()
+
+    if mode in ("one_per_demo", "one", "default"):
+        # if user explicitly requests a number, fall back to cycle behavior
+        base = np.arange(n_demos, dtype=int)
+        reps = int(np.ceil(n_rollouts / n_demos))
+        return np.tile(base, reps)[:n_rollouts]
+
+    if mode == "cycle":
+        base = np.arange(n_demos, dtype=int)
+        reps = int(np.ceil(n_rollouts / n_demos))
+        return np.tile(base, reps)[:n_rollouts]
+
+    if mode == "stochastic":
+        if probs is None:
+            p = None  # numpy uses uniform when p=None
+        else:
+            p = np.asarray(probs, dtype=float).reshape(-1)
+            if p.size != n_demos:
+                raise ValueError(f"probs must have length n_demos={n_demos}, got {p.size}")
+            s = p.sum()
+            if not np.isfinite(s) or s <= 0:
+                raise ValueError("probs must sum to a positive finite value")
+            p = p / s
+        return rng.choice(n_demos, size=n_rollouts, replace=True, p=p).astype(int)
+
+    raise ValueEgtrror(f"Unknown mode: {mode}")
