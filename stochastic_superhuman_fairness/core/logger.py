@@ -62,7 +62,7 @@ class Logger:
         self._file.write(json.dumps(meta) + "\n")
 
     # ----------------------------------------------------------
-    def log(self, record: dict, flatten: bool = True, keep_path: bool = True):
+    def log(self, record: dict, flatten: bool = True, keep_path: bool = True, verbose: bool = True):
         record = {k: v for k, v in record.items() if v is not None}
         if flatten:
             record = flatten_record(record, keep_path=keep_path)
@@ -76,14 +76,15 @@ class Logger:
         #  self._file.write(json.dumps(record) + "\n")
 
         # Pretty console summary
-        if "algo" in record and "epoch" in record:
-            tag = f"[{record['algo'].upper()} | Epoch {record['epoch']}]"
-        elif record.get("event") == "phase_transition":
-            tag = f"[→ PHASE {record['phase']}: {record['algo'].upper()}]"
-        else:
-            tag = "[LOG]"
-        msg = f"\n{tag} { {k:v for k,v in record.items() if k not in ['time','algo','epoch','phase']} }"
-        print(msg)
+        if verbose:
+            if "algo" in record and "epoch" in record:
+                tag = f"[{record['algo'].upper()} | Epoch {record['epoch']}]"
+            elif record.get("event") == "phase_transition":
+                tag = f"[→ PHASE {record['phase']}: {record['algo'].upper()}]"
+            else:
+                tag = "[LOG]"
+            msg = f"\n{tag} { {k:v for k,v in record.items() if (k not in ['time','algo','epoch','phase']) and 'dir' not in k} }"
+            print(msg)
 
     # ----------------------------------------------------------
     def log_transition(self, phase_idx: int, algo: str):

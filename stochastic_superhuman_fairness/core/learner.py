@@ -33,8 +33,8 @@ class Learner:
         self.device = getattr(self.cfg, "device", 'cpu')
         self.global_step = 0
         # schedule: list of dicts, each with 'algo', 'epochs', and model-specific params
-        # Validate + normalize training schedule
-        #  self.schedule = self._validate_schedule(self.cfg.learner.schedule)
+        # Make sure each alho in the schedule is populated with default values from the default entry of config.
+        # Shared keys with None values get assigned default values.
         self.schedule = validate_schedule(self.cfg.learner.schedule, cfg=self.cfg, device=self.device)
 
     # ----------------------------------------------------------
@@ -54,10 +54,10 @@ class Learner:
         return new_model
 
     # ----------------------------------------------------------
-    def _log(self, stats: Dict[str, Any]):
+    def _log(self, stats: Dict[str, Any], verbose: bool = True):
         """Pass metrics to logger (if available)."""
         if self.logger is not None:
-            self.logger.log(stats)
+            self.logger.log(stats, verbose = verbose)
         else:
             print(stats)
 
@@ -71,7 +71,10 @@ class Learner:
             epochs = phase_cfg.get("epochs", 1)
             batch_size = train_cfg.get("batch_size", 1)
             subdom_type = getattr(scfg, "type", "standard").lower()
-            print(f"\n🚀 Phase {phase_idx+1}/{len(self.schedule)} — {algo.upper()} ({epochs} epochs)")
+            print('\n'+'-'*80+f"\n🚀 Phase {phase_idx+1}/{len(self.schedule)} — {algo.upper()} ({epochs} epochs)")
+            print(f"Starting, with parameters:")
+            phase_cfg.pretty_print()
+            print('-'*80+'\n')
 
             # Initialize or switch model
             self.switch_algo(algo, phase_cfg)
@@ -84,8 +87,8 @@ class Learner:
             # ----------------------
             # Phase training loop
             # ----------------------
+            #  import ipdb;ipdb.set_trace()
             for ep in range(epochs):
-                #  import ipdb;ipdb.set_trace()
                 stats_train = self.model.train_one_epoch(self.demo, subdom_type = subdom_type, **train_cfg)
                 stats_train.update({
                     "epoch": ep,
@@ -93,7 +96,7 @@ class Learner:
                     "algo": algo,
                     "stage": "train"
                 })
-                self._log(stats_train)
+                self._log(stats_train, verbose = (ep % phase_cfg['train_print_freq'] == 0))
 
                 # ---- Conditional evaluation ----
                 if (ep + 1) % eval_freq == 0:
@@ -135,9 +138,14 @@ class Learner:
         if hasattr(self.cfg, "global"):
             merged_cfg["global"] = self.cfg['global']
         # Drop bayesian configs if not needed
-        if 'bayesian' not in algo.lower():
-            if hasattr(merged_cfg.get('train'), 'bayesian'):
-                del merged_cfg['train']['bayesian']
+        drop_keys = ['bayesian']
+        for key in drop_keys:
+            if key not in algo.lower():
+                if hasattr(merged_cfg.get('train'), key):
+                    try:
+                        del merged_cfg['train'][key]
+                    except:
+                        import ipdb;ipdb.set_trace()
 
         model_cls = MODEL_REGISTRY[algo]
         return model_cls(merged_cfg, self.demo)

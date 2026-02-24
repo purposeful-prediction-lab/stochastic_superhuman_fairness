@@ -18,13 +18,14 @@ metrics:
 # Subdominance configuration
 # =========================
 subdominance:
-  type: bayesian  # standard | stochastic
+  # type: bayesian  # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
   alpha: 1.0
   beta: 1.0
   adaptive_beta: false
   weight_mode: simple # simple, softmax, linear
+  alpha_updates: analytical
 
 # =========================
 # Demonstrator configuration
@@ -33,7 +34,7 @@ demonstrator:
   dataset: "adult" # adult or compass
   demotype: lrdecisions  # partition or lrdecisions
   n_models: 100 # only used with lr decisions. How many classifier are trained. One per demo.
-  subset_ratio: 0.7 # subset of training data that lr classifiers are used, but provide pred to entire train set.
+  subset_ratio: 0.1 # subset of training data that lr classifiers are used, but provide pred to entire train set.
   demo_size: 100  # ingored with lr decisions, only used for partitions
   compute_global: true
   normalize: True # Constraint valuesa
@@ -52,47 +53,47 @@ demonstrator:
 # =========================
 learner:
   schedule:
-    - algo: bayesianLogistic
-      epochs: 100
-      eval_freq: 4
+    - algo: subdominantLogistic
+      epochs: 400
+      eval_freq: 200
+      train_print_freq: 100
       model_cfg:
         policy:
+        init_noise_std: 0.05
       train:
         lr: 0.001
         batch_size: 100
-        bayesian:
-          dist_mode: 'full_param_mvn'
-          ema: 1.0
-          max_mean_delta:
-          var_ratio_clip: #[0.1, 10.0]
-
-    # - algo: mlp
-    #   epochs: 20
-    #   lr: 0.004
-    #   hidden_size: 64
-    #   eval_freq: 5
-    #
-    # - algo: ppo
+        stochastic:
+        
+    # - algo: bayesianLogistic
     #   epochs: 100
-    #   lr: 0.0003
-    #   gamma: 0.99
-    #   value_coef: 0.5
-    #   eval_freq: 10
-    #
+    #   eval_freq: 4
+    #   model_cfg:
+    #     policy:
+    #   train:
+    #     lr: 0.001
+    #     batch_size: 100
+    #     bayesian:
+    #       dist_mode: 'full_param_mvn'
+    #       ema: 1.0
+    #       max_mean_delta:
+    #       var_ratio_clip: #[0.1, 10.0]
+    
   default:
     model_cfg:
     epochs: 10
     train:
       lr: 1e-3
       batch_size: 32
-      bayesian:
+      stochastic:
         solver: 'mosek'
-        n_rollouts: 256
         row_constraints: False
-        dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn
         ot_temperature: 1.0
+        normalize_s_matrix: True
+      bayesian:
+        n_rollouts: 256
+        dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn
         ema : 0.2
         var_floor: 1e-8  
         cov_floor: 1e-5  
         shrinkage: 0.2
-        normalize_s_matrix: True

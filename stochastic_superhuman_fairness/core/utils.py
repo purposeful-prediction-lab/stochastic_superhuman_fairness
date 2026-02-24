@@ -1,6 +1,17 @@
 from omegaconf import OmegaConf
 from types import SimpleNamespace
 import os, random, numpy as np, torch
+import torch
+
+from sklearn.linear_model import LogisticRegression
+
+@torch.no_grad()
+def sample_binary_from_probs(probs: torch.Tensor) -> torch.Tensor:
+    """
+    probs: tensor in [0,1], any shape
+    returns: {0,1} float tensor of same shape
+    """
+    return torch.bernoulli(probs).float()
 
 class NamespaceDict(SimpleNamespace):
     """A SimpleNamespace with dict-like get() method and repr that hides internals."""
@@ -10,6 +21,11 @@ class NamespaceDict(SimpleNamespace):
 
     def __setitem__(self, key, value):
         setattr(self, key, value)
+
+    def __delitem__(self, key):
+        if not hasattr(self, key):
+            raise KeyError(key)
+        delattr(self, key)
 
     def __getitem__(self, key):
         return getattr(self, key)
@@ -42,19 +58,21 @@ class NamespaceDict(SimpleNamespace):
     def update_from(self, other):
             """
             Update this NamespaceDict with values from `other`.
-            - Keys missing in `other` are left untouched.
+            - Keys missing in `other` are left untouched; keys with None values get assigned self values.
             - If both values are NamespaceDict, update recursively.
             """
             if not isinstance(other, NamespaceDict):
                 raise TypeError("update_from expects a NamespaceDict")
 
+            #  import ipdb;ipdb.set_trace()
             for key, value in vars(other).items():
                 if hasattr(self, key):
                     current = getattr(self, key)
-                    if isinstance(current, NamespaceDict) and isinstance(value, NamespaceDict):
-                        current.update_from(value)
-                    else:
-                        setattr(self, key, value)
+                    if value is not None:
+                        if isinstance(current, NamespaceDict) and isinstance(value, NamespaceDict):
+                            current.update_from(value)
+                        else:
+                            setattr(self, key, value)
                 else:
                     setattr(self, key, value)
     def copy(self):
@@ -70,6 +88,41 @@ class NamespaceDict(SimpleNamespace):
             else:
                 return obj
         return clone(self)
+
+    def pretty_print(self, indent=0):
+        """Recursively pretty-print the NamespaceDict."""
+        indent_str = "    " * indent  # 4 spaces per level
+
+        for key, value in vars(self).items():
+            if isinstance(value, (NamespaceDict, dict)):
+                print(f"{indent_str}{key}:")
+                if isinstance(value, dict):
+                    # Convert dict to NamespaceDict-like behavior
+                    for sub_key, sub_val in value.items():
+                        if isinstance(sub_val, (NamespaceDict, dict)):
+                            print(f"{indent_str}    {sub_key}:")
+                            if isinstance(sub_val, dict):
+                                NamespaceDict(**sub_val).pretty_print(indent + 2)
+                            else:
+                                sub_val.pretty_print(indent + 2)
+                        else:
+                            print(f"{indent_str}    {sub_key}: {sub_val}")
+                else:
+                    value.pretty_print(indent + 1)
+
+            elif isinstance(value, list):
+                print(f"{indent_str}{key}:")
+                for i, item in enumerate(value):
+                    if isinstance(item, (NamespaceDict, dict)):
+                        print(f"{indent_str}    -")
+                        if isinstance(item, dict):
+                            NamespaceDict(**item).pretty_print(indent + 2)
+                        else:
+                            item.pretty_print(indent + 2)
+                    else:
+                        print(f"{indent_str}    - {item}")
+            else:
+                print(f"{indent_str}{key}: {value}")
 
 def to_namespace(obj):
     if isinstance(obj, dict):
@@ -158,3 +211,37 @@ def set_all_seeds(seed: int = 0):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def sample_logistic_model(cfg, seed=None):
+    rng = np.random.default_rng(seed)
+
+    solvers = ["lbfgs", "liblinear", "saga"]
+    solver = rng.choice(solvers)
+
+    # Valid penalties per solver
+    if solver == "liblinear":
+        penalty = rng.choice(["l1", "l2"])
+    elif solver == "saga":
+        penalty = rng.choice(["l1", "l2", "elasticnet"])
+    else:  # lbfgs
+        penalty = "l2"
+
+    C = float(rng.lognormal(mean=0.0, sigma=1.0))  # wide variability
+    max_iter = int(rng.integers(0,10))
+
+    l1_ratio = None
+    if penalty == "elasticnet":
+        l1_ratio = rng.uniform(0.0, 1.0)
+
+    lr = LogisticRegression(
+        solver=solver,
+        penalty=penalty,
+        C=C,
+        max_iter=max_iter,
+        l1_ratio=l1_ratio,
+        n_jobs=int(getattr(cfg, "lr_n_jobs", 1)),
+        random_state=rng.integers(0, 10_000),
+    )
+
+    return lr

@@ -241,9 +241,10 @@ def _solve_qp_mosek_core(
         gamma = np.zeros(n)
         task.getxx(mosek.soltype.itr, gamma)
         gamma_matrix = gamma.reshape((num_samples, num_demos))
-        if (gamma < 0 ).any():
-            print("Some gamma matrix values were negative; rectifying to 0. Numerical error in very small values? (<1e-6)")
-            gamma_matrix = np.clip(gamma_matrix, a_min=0.0, a_max=None)
+        if verbose:
+            if (gamma < 0 ).any():
+                print("Some gamma matrix values were negative; rectifying to 0. Numerical error in very small values? (<1e-6)")
+                gamma_matrix = np.clip(gamma_matrix, a_min=0.0, a_max=None)
         # print("γ column sums:", gamma_matrix.sum(axis=0))
         # print("Target q:", q_demos)
 
@@ -374,9 +375,10 @@ def _solve_sinkhorn_core(
 
     gamma = (u[:, None] * K) * v[None, :]
     #  import ipdb;ipdb.set_trace()
-    if (gamma < 0 ).any():
-        print("Some gamma matrix values were negative; rectifying to 0. Numerical error in very small values? (<1e-6)")
-        gamma = np.clip(gamma, a_min=0.0, a_max=None)
+    if verbose:
+        if (gamma < 0 ).any():
+            print("Some gamma matrix values were negative; rectifying to 0. Numerical error in very small values? (<1e-6)")
+            gamma = np.clip(gamma, a_min=0.0, a_max=None)
 
     # Optional global renormalization: makes Γ a probability table even if unconstrained
     if renormalize_gamma:

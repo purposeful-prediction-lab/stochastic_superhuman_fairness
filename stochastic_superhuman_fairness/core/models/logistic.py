@@ -43,6 +43,7 @@ class LogisticRegressionModel(BaseModel):
         return self.policy.parameters()
     # ----------------------------------------------------------
     def forward(self, X):
+        '''Return logits'''
         return self.policy(X)
     # ----------------------------------------------------------
     def forward_for_loss(self, X):
@@ -128,7 +129,7 @@ class LogisticRegressionModel(BaseModel):
         return p, y_samp
 
     # ----------------------------------------------------------
-    def train_one_epoch_standard(self, demonstrator, batch_size: int = 1, decision_threshold: float = None):
+    def _train_one_epoch(self, demonstrator, batch_size: int = 1, decision_threshold: float = None):
         device = self.device
         demonstrator.to_torch(device)
 
@@ -203,81 +204,81 @@ class LogisticRegressionModel(BaseModel):
             "train/fairness":      rollout_feats.mean(dim=0).detach().cpu().tolist(),
         }
     # ----------------------------------------------------------
-    def train_one_epoch_stochastic(self, demonstrator, batch_size=1, n_dir=20, decision_threshold: float = None):
-        """
-        Stochastic subdominance training for Logistic Regression:
-          1) One rollout per demo → compute fairness_feats
-          2) Build full subdominance matrix S[R,D]
-          3) Solve OT → get gamma + duals + weights
-          4) UPDATE model (closed-form stub for now)
-          5) Return metrics
-        """
-        demos = demonstrator.train_demos
-        R = len(demos)
-        #  import ipdb;ipdb.set_trace()
-        # ----------------------------------------------------
-        # 1) Collect rollouts (compute fairness features only)
-        # ----------------------------------------------------
-        rollout_feats = []
-        for d in demos:
-            Xd, y, yd, Ad = d["X"], d['y'], demonstrator.get_targets(d), d["A"]
-            P, y_hat = self.sample_actions(Xd, threshold = decision_threshold)
-            #  logits = Xd.cpu().numpy() @ self.policy.weight.detach().cpu().numpy() + self.policy.bias.detach().cpu().numpy()
-            f_r = compute_fairness_features(Xd, yd, y_hat, Ad, self.metrics_list)
-            rollout_feats.append(f_r)
-
-        rollout_feats = torch.stack(rollout_feats, dim=0)  # [R,K]
-        #  rollout_feats = np.stack(rollout_feats)         # [R, Kf]
-
-        # demo fairness matrix
-        demo_feats = np.stack([d["fairness_feats"] for d in demos])   # [D,Kf]
-
-        # ----------------------------------------------------
-        # 2) Compute subdominance matrix S[R,D]
-        # ----------------------------------------------------
-        S = compute_subdominance_matrix(
-            rollout_feats,
-            demo_feats,
-            mode=self.subdom_mode,
-            alpha=self.compute_alpha(),       # placeholder
-            beta=self.compute_beta(),         # placeholder
-        )
-
-        # ----------------------------------------------------
-        # 3) Compute directional costs (pre-OT)
-        # ----------------------------------------------------
-        dir_cost = compute_directional_cost(rollout_feats.cpu().numpy(), demo_feats, n_dir=n_dir)
-
-        # ----------------------------------------------------
-        # 4) Solve OT / QP → get weights
-        # ----------------------------------------------------
-        out = solve_stochastic_subdom_coupling(
-            S,
-            solver="mosek",
-            weight_method="primal",           # or "dual" / "row_dual"
-            debias_rowcol=True,
-            normalize=True,
-        )
-
-        weights = out["weights_np"]          # shape [R]
-
-        # ----------------------------------------------------
-        # 5) CLOSED-FORM UPDATE (placeholder)
-        # ----------------------------------------------------
-        self.update_stochastic_closed_form(
-            rollout_feats, demo_feats, weights
-        )
-        # ----------------------------------------------------
-        # 6) Return metrics
-        # ----------------------------------------------------
-        return {
-            "train/zero_one_loss": float(np.mean([d["zero_one"] for d in demos])) if "zero_one" in demos[0] else None,
-            "train/mean_subdom": float(S.mean()),
-            "train/std_subdom": float(S.std()),
-            "train/fairness": rollout_feats.mean(axis=0).tolist(),
-            "train/directional_cost": dir_cost,
-        }
-
+    #  def train_one_epoch_stochastic(self, demonstrator, batch_size=1, n_dir=20, decision_threshold: float = None):
+    #      """
+    #      Stochastic subdominance training for Logistic Regression:
+    #        1) One rollout per demo → compute fairness_feats
+    #        2) Build full subdominance matrix S[R,D]
+    #        3) Solve OT → get gamma + duals + weights
+    #        4) UPDATE model (closed-form stub for now)
+    #        5) Return metrics
+    #      """
+    #      demos = demonstrator.train_demos
+    #      R = len(demos)
+    #      #  import ipdb;ipdb.set_trace()
+    #      # ----------------------------------------------------
+    #      # 1) Collect rollouts (compute fairness features only)
+    #      # ----------------------------------------------------
+    #      rollout_feats = []
+    #      for d in demos:
+    #          Xd, y, yd, Ad = d["X"], d['y'], demonstrator.get_targets(d), d["A"]
+    #          P, y_hat = self.sample_actions(Xd, threshold = decision_threshold)
+    #          #  logits = Xd.cpu().numpy() @ self.policy.weight.detach().cpu().numpy() + self.policy.bias.detach().cpu().numpy()
+    #          f_r = compute_fairness_features(Xd, yd, y_hat, Ad, self.metrics_list)
+    #          rollout_feats.append(f_r)
+    #
+    #      rollout_feats = torch.stack(rollout_feats, dim=0)  # [R,K]
+    #      #  rollout_feats = np.stack(rollout_feats)         # [R, Kf]
+    #
+    #      # demo fairness matrix
+    #      demo_feats = np.stack([d["fairness_feats"] for d in demos])   # [D,Kf]
+    #
+    #      # ----------------------------------------------------
+    #      # 2) Compute subdominance matrix S[R,D]
+    #      # ----------------------------------------------------
+    #      S = compute_subdominance_matrix(
+    #          rollout_feats,
+    #          demo_feats,
+    #          mode=self.subdom_mode,
+    #          alpha=self.compute_alpha(),       # placeholder
+    #          beta=self.compute_beta(),         # placeholder
+    #      )
+    #
+    #      # ----------------------------------------------------
+    #      # 3) Compute directional costs (pre-OT)
+    #      # ----------------------------------------------------
+    #      dir_cost = compute_directional_cost(rollout_feats.cpu().numpy(), demo_feats, n_dir=n_dir)
+    #
+    #      # ----------------------------------------------------
+    #      # 4) Solve OT / QP → get weights
+    #      # ----------------------------------------------------
+    #      out = solve_stochastic_subdom_coupling(
+    #          S,
+    #          solver="mosek",
+    #          weight_method="primal",           # or "dual" / "row_dual"
+    #          debias_rowcol=True,
+    #          normalize=True,
+    #      )
+    #
+    #      weights = out["weights_np"]          # shape [R]
+    #
+    #      # ----------------------------------------------------
+    #      # 5) CLOSED-FORM UPDATE (placeholder)
+    #      # ----------------------------------------------------
+    #      self.update_stochastic_closed_form(
+    #          rollout_feats, demo_feats, weights
+    #      )
+    #      # ----------------------------------------------------
+    #      # 6) Return metrics
+    #      # ----------------------------------------------------
+    #      return {
+    #          "train/zero_one_loss": float(np.mean([d["zero_one"] for d in demos])) if "zero_one" in demos[0] else None,
+    #          "train/mean_subdom": float(S.mean()),
+    #          "train/std_subdom": float(S.std()),
+    #          "train/fairness": rollout_feats.mean(axis=0).tolist(),
+    #          "train/directional_cost": dir_cost,
+    #      }
+    #
     @torch.no_grad()
     def _sample_policy_params_normal(self, sigma: float):
         """

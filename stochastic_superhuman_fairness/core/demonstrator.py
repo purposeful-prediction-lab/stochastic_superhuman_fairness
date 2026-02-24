@@ -8,10 +8,9 @@ from omegaconf import OmegaConf
 from stochastic_superhuman_fairness.core.dataset_utils import load_adult, load_compas
 from stochastic_superhuman_fairness.core.data_defaults import DEFAULT_DATA_CONFIGS
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC_REGISTRY, zero_one_loss
-#  from stochastic_superhuman_fairness.core.fairness.compute_fairness_utils import compute_fairness_features
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
-from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict
+from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict, sample_logistic_model
 
 
 class Demonstrator:
@@ -303,7 +302,6 @@ class Demonstrator:
 
         """demotype=lrdecisions: train n LR models on subsets, predict on full (X,y)."""
 
-        from sklearn.linear_model import LogisticRegression
 
         if A is None:
             raise ValueError("demotype=lrdecisions requires sensitive A (cfg.demonstrator.sensitive_attrs).")
@@ -323,19 +321,20 @@ class Demonstrator:
 
         rng = np.random.default_rng(int(getattr(self.cfg, "seed", 0)) + (999 if is_eval else 0))
         demos = []
-
+        model_type = 'evaluation' if is_eval else 'training'
+        print(f"Generating {n_models}  Classifiers as {model_type} demonstrators")
         for m in range(n_models):
-            print('\n'+'-'*30 + f"Training logistic demonstrator {m}/{n_models}.")
+            print('\n'+'-'*30 + f"Fitting logistic demonstrator {m}/{n_models}.")
 
             idx = rng.choice(n, size=subset_size, replace=False)
 
-            lr = LogisticRegression(
-                max_iter=int(getattr(cfg, "lr_max_iter", 200)),
-                C=float(getattr(cfg, "lr_C", 1.0)),
-                solver=str(getattr(cfg, "lr_solver", "lbfgs")),
-                n_jobs=int(getattr(cfg, "lr_n_jobs", 1)),
-            )
-
+            #  lr = LogisticRegression(
+            #      max_iter=int(getattr(cfg, "lr_max_iter", 200)),
+            #      C=float(getattr(cfg, "lr_C", 1.0)),
+            #      solver=str(getattr(cfg, "lr_solver", "lbfgs")),
+            #      n_jobs=int(getattr(cfg, "lr_n_jobs", 1)),
+            #  )
+            lr = sample_logistic_model(cfg)
             lr.fit(X[idx], y[idx])
 
             y_demo = lr.predict_proba(X)[:, 1].astype(np.float32)  # decisions on full set, returns probs

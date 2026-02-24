@@ -28,20 +28,25 @@ class BaseModel(ABC, nn.Module):
         super().__init__()
         self.cfg = cfg
         self.demo = demonstrator
-        self.device = getattr(cfg, "device", "cpu")
+        self.device = cfg.get('device')
         self.policy = None
         self.value = None
         self.opt = None
+        self.modeltype = str(cfg['algo'])
+
+        self.model_cfg = cfg.get('model_cfg', {})
         # --- subdominance configuration ---
         scfg = cfg.get('subdominance', {})
         self.subdom_mode = scfg.get("mode", "absolute")
         self.subdom_type = scfg.get("type", "standard")
         self.subdom_agg = scfg.get("rollout_aggregate", "mean")
         self.subdom_weight_mode = scfg.get("weight_mode", "softmax")  # or "linear"
+        self.alpha_updates = scfg.get("alpha_updates", "analytical")
         self.alpha = scfg.get("alpha")
         self.beta = scfg.get("beta")
         # --- Get required fairness metrics ---
         self.metrics_list = self._resolve_metrics(cfg, demonstrator)
+        #  import ipdb;ipdb.set_trace()
 
     # ----------------------------------------------------------
 
@@ -66,21 +71,13 @@ class BaseModel(ABC, nn.Module):
         kwargs propagate to the underlying method (batch size, shuffle, etc.)
         """
 
-        tkwargs = {'batch_size':batch_size,  **kwargs}
-        if subdom_type == "stochastic":
-            return self.train_one_epoch_stochastic(demonstrator, **tkwargs)
-
-        elif subdom_type == "standard":
-            return self.train_one_epoch_standard(demonstrator, **tkwargs)
-        elif subdom_type == "bayesian":
-            flattened_tkwargs = flatten_dict(kwargs, keep_path = False)
-            return self.train_one_epoch_stochastic_bayesian(demonstrator, no_update = False, **flattened_tkwargs)
-            #  return self.train_one_epoch_stochastic_bayesian_dummy(demonstrator, **flattened_tkwargs)
-        else:
-            raise ValueError(f"Unknown training mode '{self.cfg.subdom_mode}'")
-
+        #  import ipdb;ipdb.set_trace()
+        tkwargs = {'batch_size':batch_size, 'alpha_updates': self.alpha_updates, **kwargs}
+        tkwargs = flatten_dict(tkwargs, keep_path = False)
+        return self._train_one_epoch(demonstrator, no_update = False, **tkwargs)
 
     # ----------------------------------------------------------
+
     @torch.no_grad()
     def collect_rollouts(self, demonstrator, demos=None, decision_threshold=None):
         if demos is None:
@@ -244,6 +241,10 @@ class BaseModel(ABC, nn.Module):
             """
             return self.phi_mean_per_demo(demos, add_bias = add_bias, stochastic = stochastic).mean(axis=0)
 
+    @torch.no_grad()
+    def apply_S_temperature(self, S, beta: float = 1.0):
+        """Use before OT: S_beta = beta * S."""
+        return beta * S
 
     def evaluate(self, demonstrator, y_domain="01"):
             """

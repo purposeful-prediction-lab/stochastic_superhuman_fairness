@@ -95,7 +95,7 @@ class BayesianLogisticRegressionModel(StochasticParamDistMixin, LogisticRegressi
                 "train/dist_mode": dist_mode,
                 }
 
-    def train_one_epoch_stochastic_bayesian(
+    def _train_one_epoch(
         self,
         demonstrator,
         batch_size: int = 1,

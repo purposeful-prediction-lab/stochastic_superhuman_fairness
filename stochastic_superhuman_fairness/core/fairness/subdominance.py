@@ -1,5 +1,9 @@
 from __future__ import annotations
 from typing import Literal, Optional, Tuple, Dict, Union
+from dataclasses import dataclass
+import torch
+import torch.nn.functional as F
+
 
 try:
     import torch
@@ -12,6 +16,129 @@ import numpy as np
 
 Mode = Literal["absolute", "relative"]
 Agg  = Literal["sum", "mean", "max"]
+
+@dataclass
+class SubdomLossOut:
+    loss: torch.Tensor
+    info: dict
+# ================================================================================================================
+# Losses =========================================================================================================
+# ================================================================================================================
+def subdominant_logloss_shared_X_multi_rollout(
+    *,
+    logits_rollouts: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
+    yhat_rollouts: torch.Tensor,      # [R,N] pseudo labels for each rollout i
+    y_demo: torch.Tensor,             # [D,N] demo labels for each demo j
+    gamma: torch.Tensor,              # [R,D]
+    indicator_win: torch.Tensor,      # [R,D] 1 if S_ij <= Srev_ji else 0
+    eps: float = 1e-12,
+    normalize_gamma: bool = False,
+) -> SubdomLossOut:
+    """
+    Implements:
+
+      L = sum_i (sum_j gamma_ij * Iwin_ij) * BCE(logits_i, yhat_i)
+        + sum_{i,j} gamma_ij * (1-Iwin_ij) * BCE(logits_i, y_demo_j)
+
+    Shared X across all i and j.
+    """
+    device = logits_rollouts.device
+    logits_rollouts = logits_rollouts.to(device).float()  # [R,N]
+    yhat_rollouts = yhat_rollouts.to(device).float()      # [R,N]
+    y_demo = y_demo.to(device).float()                    # [D,N]
+    gamma = gamma.to(device).float()                      # [R,D]
+    I = indicator_win.to(device).float()                  # [R,D]
+
+    if normalize_gamma:
+        gamma = gamma / (gamma.sum() + eps)
+
+    R, N = logits_rollouts.shape
+    D = y_demo.shape[0]
+
+    # --- term 1: rollout wins -> fit yhat_i under logits_i ---
+    # per-rollout BCE: [R]
+    bce_roll = F.binary_cross_entropy_with_logits(
+        logits_rollouts, yhat_rollouts, reduction="none"
+    ).mean(dim=1)  # [R]
+
+    w_win_i = (gamma * I).sum(dim=1)  # [R]
+    term1 = (w_win_i * bce_roll).sum()
+
+    # --- term 2: rollout loses to demo -> fit y_demo_j under logits_i ---
+    # BCE for every (i,j): compute BCE(logits_i, y_demo_j) -> [R,D]
+    # Expand:
+    #   logits: [R,1,N]
+    #   y_demo: [1,D,N]
+    logits_ = logits_rollouts[:, None, :]   # [R,1,N]
+    ydemo_  = y_demo[None, :, :]            # [1,D,N]
+
+    bce_pair = F.binary_cross_entropy_with_logits(
+        logits_.expand(R, D, N),
+        ydemo_.expand(R, D, N),
+        reduction="none",
+    ).mean(dim=2)  # [R,D]
+
+    w_lose_ij = gamma * (1.0 - I)           # [R,D]
+    term2 = (w_lose_ij * bce_pair).sum()
+
+    loss = term1 + term2
+
+    info = {
+        "w_win_sum": float(w_win_i.sum().detach().cpu()),
+        "w_lose_sum": float(w_lose_ij.sum().detach().cpu()),
+        "indicator_mean": float(I.mean().detach().cpu()),
+        "term1": float(term1.detach().cpu()),
+        "term2": float(term2.detach().cpu()),
+    }
+    return SubdomLossOut(loss=loss, info=info)
+
+# ---------------------------------------------------------------------------------
+
+def subdominance_loss_from_features(
+    rollout_feats,              # [R, K]
+    demo_feats,                 # [D, K]
+    mode: Mode = "absolute",
+    agg: Agg = "mean",
+    alpha=None,
+    beta=None,
+    reduction: Literal["mean", "sum", "none"] = "mean",
+) -> Dict[str, object]:
+    """
+    High-level entry: compute S matrix, aggregate per rollout, then reduce to a scalar loss.
+
+    Returns dict:
+      {
+        "S": pairwise matrix [R,D] (same backend as inputs),
+        "per_rollout": [R], aggregated per rollout,
+        "loss": scalar (or vector if reduction='none')
+      }
+    """
+    S = compute_subdominance_matrix(rollout_feats, demo_feats, mode=mode, alpha=alpha, beta=beta)
+    per_rollout = aggregate_subdominance(S, agg=agg)
+    #  import ipdb;ipdb.set_trace()
+    # Reduction to scalar loss (default: mean over rollouts)
+    if _is_tensor(per_rollout):
+        if reduction == "mean":
+            loss = per_rollout.mean()
+        elif reduction == "sum":
+            loss = per_rollout.sum()
+        elif reduction == "none":
+            loss = per_rollout
+        else:
+            raise ValueError(f"Unknown reduction: {reduction}")
+    else:
+        if reduction == "mean":
+            loss = float(per_rollout.mean())
+        elif reduction == "sum":
+            loss = float(per_rollout.sum())
+        elif reduction == "none":
+            loss = per_rollout
+        else:
+            raise ValueError(f"Unknown reduction: {reduction}")
+
+    return {"S": S, "per_rollout": per_rollout, "loss": loss}
+
+
 
 def _is_tensor(x):
     return _has_torch and isinstance(x, torch.Tensor)
@@ -74,6 +201,22 @@ def _broadcast_params(alpha, beta, K, like):
     return a.reshape(1,K), b.reshape(1,K)
 
 # -------------------------------------------------------------------------------------
+
+def build_indicator_from_subdom(
+    S: torch.Tensor,
+    S_ref: torch.Tensor,
+    *,
+    margin: float = 0.0,
+) -> torch.Tensor:
+    """
+    Indicator I_{ij} = 1 if S_ij + margin < S_ref_ji else 0.
+    Shapes:
+      S:      [R, D]
+      S_ref:  [R, D]
+    Returns:
+      I: float tensor [R, D] in {0,1}
+    """
+    return (S + margin < S_ref).to(dtype=S.dtype)
 
 def compute_subdominance_matrix(
     rollout_feats,              # [R, K]
@@ -252,53 +395,8 @@ def aggregate_subdominance(
         else:
             raise ValueError(f"Unknown aggregation: {agg}")
 
+# ---------------------------------------------------------------------------------
 
-def subdominance_loss_from_features(
-    rollout_feats,              # [R, K]
-    demo_feats,                 # [D, K]
-    mode: Mode = "absolute",
-    agg: Agg = "mean",
-    alpha=None,
-    beta=None,
-    reduction: Literal["mean", "sum", "none"] = "mean",
-) -> Dict[str, object]:
-    """
-    High-level entry: compute S matrix, aggregate per rollout, then reduce to a scalar loss.
-
-    Returns dict:
-      {
-        "S": pairwise matrix [R,D] (same backend as inputs),
-        "per_rollout": [R], aggregated per rollout,
-        "loss": scalar (or vector if reduction='none')
-      }
-    """
-    S = compute_subdominance_matrix(rollout_feats, demo_feats, mode=mode, alpha=alpha, beta=beta)
-    per_rollout = aggregate_subdominance(S, agg=agg)
-    #  import ipdb;ipdb.set_trace()
-    # Reduction to scalar loss (default: mean over rollouts)
-    if _is_tensor(per_rollout):
-        if reduction == "mean":
-            loss = per_rollout.mean()
-        elif reduction == "sum":
-            loss = per_rollout.sum()
-        elif reduction == "none":
-            loss = per_rollout
-        else:
-            raise ValueError(f"Unknown reduction: {reduction}")
-    else:
-        if reduction == "mean":
-            loss = float(per_rollout.mean())
-        elif reduction == "sum":
-            loss = float(per_rollout.sum())
-        elif reduction == "none":
-            loss = per_rollout
-        else:
-            raise ValueError(f"Unknown reduction: {reduction}")
-
-    return {"S": S, "per_rollout": per_rollout, "loss": loss}
-
-
-# ---------- placeholders for parameter learning (alpha/beta) ----------
 def compute_alpha(
     rollouts,
     demos,
@@ -377,6 +475,20 @@ def compute_alpha(
 
     return _to_backend(out, like)
 
+# ---------------------------------------------------------------------------------
+
+def compute_beta(rollout_feats, demo_feats, mode: Mode = "absolute"):
+    """
+    Placeholder for closed-form beta based on rollout and demo features.
+    Must return shape [K].
+    For now, returns ones.
+    """
+    like = rollout_feats
+    K = rollout_feats.shape[-1]
+    return _to_backend(np.ones((K,), dtype=np.float32), like)
+
+# ---------------------------------------------------------------------------------
+
 def compute_sorted_demo_means(demos, *, means_mode: str = "identity"):
     """
     Returns demos_means_sorted: (D,K) sorted ascending per column.
@@ -405,63 +517,52 @@ def compute_sorted_demo_means(demos, *, means_mode: str = "identity"):
     # sort each feature column ascending (required by np.searchsorted usage)
     return np.sort(m, axis=0)
 
-
-def compute_beta(rollout_feats, demo_feats, mode: Mode = "absolute"):
-    """
-    Placeholder for closed-form beta based on rollout and demo features.
-    Must return shape [K].
-    For now, returns ones.
-    """
-    like = rollout_feats
-    K = rollout_feats.shape[-1]
-    return _to_backend(np.ones((K,), dtype=np.float32), like)
-
+# ---------------------------------------------------------------------------------
 
 # ---------- stochastic subdominance (OT-based, placeholder) ----------
 
-def stochastic_subdominance_ot(
-    rollout_feats,              # [R, K]
-    demo_feats,                 # [D, K]
-    mode: Mode = "absolute",
-    alpha=None,
-    beta=None,
-    reg: float = 0.05,
-    return_transport: bool = False,
-) -> Dict[str, object]:
-    """
-    Placeholder for stochastic subdominance:
-      1) Build pairwise subdominance cost matrix C = S (or transformation thereof)
-      2) Solve an optimal transport (OT) problem producing a coupling P (R x D)
-      3) Marginal over demos per rollout gives probabilities over rollouts or vice versa
-
-    For now, we return a uniform coupling with the correct shapes and the base S matrix.
-    Replace with a real OT solver (e.g., Sinkhorn) later.
-
-    Returns dict:
-      {
-        "S": [R,D] base subdominance scores,
-        "P": [R,D] transport plan (placeholder uniform),
-        "obj": scalar objective proxy (e.g., <P, S>), placeholder,
-      }
-    """
-    S = compute_subdominance_matrix(rollout_feats, demo_feats, mode=mode, alpha=alpha, beta=beta)
-
-    if _is_tensor(S):
-        R, D = S.shape
-        P = torch.full_like(S, 1.0 / (R * D))
-        obj = (P * S).sum()
-    else:
-        R, D = S.shape
-        P = np.full_like(S, 1.0 / (R * D))
-        obj = float((P * S).sum())
-
-    out = {"S": S, "P": P, "obj": obj}
-    if return_transport:
-        out["transport"] = P
-    return out
-
-
-# ---------- convenience: Learner hook (optional) ----------
+#  def stochastic_subdominance_ot(
+#      rollout_feats,              # [R, K]
+#      demo_feats,                 # [D, K]
+#      mode: Mode = "absolute",
+#      alpha=None,
+#      beta=None,
+#      reg: float = 0.05,
+#      return_transport: bool = False,
+#  ) -> Dict[str, object]:
+#      """
+#      Placeholder for stochastic subdominance:
+#        1) Build pairwise subdominance cost matrix C = S (or transformation thereof)
+#        2) Solve an optimal transport (OT) problem producing a coupling P (R x D)
+#        3) Marginal over demos per rollout gives probabilities over rollouts or vice versa
+#
+#      For now, we return a uniform coupling with the correct shapes and the base S matrix.
+#      Replace with a real OT solver (e.g., Sinkhorn) later.
+#
+#      Returns dict:
+#        {
+#          "S": [R,D] base subdominance scores,
+#          "P": [R,D] transport plan (placeholder uniform),
+#          "obj": scalar objective proxy (e.g., <P, S>), placeholder,
+#        }
+#      """
+#      S = compute_subdominance_matrix(rollout_feats, demo_feats, mode=mode, alpha=alpha, beta=beta)
+#
+#      if _is_tensor(S):
+#          R, D = S.shape
+#          P = torch.full_like(S, 1.0 / (R * D))
+#          obj = (P * S).sum()
+#      else:
+#          R, D = S.shape
+#          P = np.full_like(S, 1.0 / (R * D))
+#          obj = float((P * S).sum())
+#
+#      out = {"S": S, "P": P, "obj": obj}
+#      if return_transport:
+#          out["transport"] = P
+#      return out
+#
+# ---------------------------------------------------------------------------------
 
 def compute_subdominance_loss(
     rollout_feats,

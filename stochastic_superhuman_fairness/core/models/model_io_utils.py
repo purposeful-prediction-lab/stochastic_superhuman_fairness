@@ -186,7 +186,6 @@ def validate_schedule(schedule, *, cfg, device, default_learner_cfg=None):
         entry["seed"] = cfg.seed if hasattr(cfg, "seed") else cfg.get("seed", None)
 
         validated.append(dict_to_ns(entry))
-
     return validated
 # ---------------------------------------------------------------------
 # Core loader

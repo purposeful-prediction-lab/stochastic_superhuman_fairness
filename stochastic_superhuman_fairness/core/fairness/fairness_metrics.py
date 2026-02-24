@@ -59,21 +59,32 @@ def prediction_error_disparity(y_true, a):
     return abs(err0 - err1)
 
 # Other Metrics ----------------------------------------------
-def zero_one_loss(y_true, y_pred, *args):
+def zero_one_loss(y_true, y_pred, *args, decision_threshold: float = 0.5):
     """
-    Compute mean zero-one loss (misclassification rate).
+    Mean zero-one loss.
+    Accepts logits, probabilities, or 0/1 labels.
+    Works for numpy or torch.
+    """
 
-    Accepts numpy arrays or torch tensors.
-    Returns float.
-    """
+    # ---- TORCH ----
     if torch.is_tensor(y_true):
+        if torch.is_floating_point(y_pred):
+            # logits if outside [0,1]
+            if y_pred.min() < 0 or y_pred.max() > 1:
+                y_pred = torch.sigmoid(y_pred)
+            y_pred = (y_pred >= decision_threshold).float()
         return float((y_true != y_pred).float().mean().item())
 
+    # ---- NUMPY ----
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
+
+    if np.issubdtype(y_pred.dtype, np.floating):
+        if y_pred.min() < 0 or y_pred.max() > 1:
+            y_pred = 1 / (1 + np.exp(-y_pred))  # sigmoid
+        y_pred = (y_pred >= decision_threshold).astype(y_true.dtype)
+
     return float(np.mean(y_true != y_pred))
-
-
 # ============================================================
 # TORCH VERSIONS (fully differentiable)
 # ============================================================
@@ -217,7 +228,13 @@ def compute_fairness_features(y_true, y_pred, a,
     #  import ipdb;ipdb.set_trace()
     for m in metrics:
         f_np, f_torch = FAIRNESS_REGISTRY[m]
-        fargs = (y_true, y_pred, a) if (m == 'D.PRP') or ('D.EqOdds' == m) else (y_pred, a)
+        if (m == 'D.PRP') or ('D.EqOdds' == m):
+            fargs = (y_true, y_pred, a)  
+        elif m == 'L.ZeroOne':
+            fargs = (y_true, y_pred)  
+        else:
+            fargs = (y_pred, a)
+
         if use_torch:
             feats.append(f_torch(*fargs))
         else:
