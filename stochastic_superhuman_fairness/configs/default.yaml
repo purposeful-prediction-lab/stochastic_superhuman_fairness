@@ -54,7 +54,7 @@ demonstrator:
 learner:
   schedule:
     - algo: subdominantLogistic
-      epochs: 400
+      epochs: 2000
       eval_freq: 200
       train_print_freq: 100
       model_cfg:
@@ -86,7 +86,7 @@ learner:
       lr: 1e-3
       batch_size: 32
       stochastic:
-        solver: 'mosek'
+        solver: 'sinkhorn'
         row_constraints: False
         ot_temperature: 1.0
         normalize_s_matrix: True

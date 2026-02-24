@@ -12,7 +12,7 @@ from stochastic_superhuman_fairness.core.fairness.subdominance import (
     subdominance_loss_from_features,
     compute_subdominance_matrix,
 )
-from stochastic_superhuman_fairness.core.fairness.compute_fairness_utils import compute_fairness_features
+from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features, zero_one_loss
 from core.utils import flatten_dict
 
 class BaseModel(ABC, nn.Module):
@@ -180,10 +180,6 @@ class BaseModel(ABC, nn.Module):
         """Placeholder – later: learn beta per fairness dimension."""
         return None  # triggers default β = ones(K)
 
-    def zero_one_loss(self, y_hat, y_true):
-        preds = (y_hat > 0.5).float()
-        return (preds != y_true).float().mean()
-
     def phi_mean_per_demo(
         self,
         demos,
@@ -246,7 +242,7 @@ class BaseModel(ABC, nn.Module):
         """Use before OT: S_beta = beta * S."""
         return beta * S
 
-    def evaluate(self, demonstrator, y_domain="01"):
+    def evaluate(self, demonstrator, y_domain="01", decision_threshold: float = 0.5):
             """
             Vectorized evaluation over all evaluation demos.
             Returns metrics prefixed with 'eval/' for consistency.
@@ -277,10 +273,10 @@ class BaseModel(ABC, nn.Module):
                 logits = self.policy(Xe).squeeze(-1)
                 y_hat = torch.sigmoid(logits)
                 ye = ye.view_as(y_hat)
-                zero_one_loss = self.zero_one_loss(y_hat, ye)
+                pred_loss = zero_one_loss(ye, y_hat, decision_threshold = decision_threshold)
 
                 # Compute fairness features for eval data
-                f_eval = compute_fairness_features(Xe, ye, y_hat, Ae, metrics=self.metrics_list)
+                f_eval = compute_fairness_features(ye, y_hat, Ae, metrics=self.metrics_list)
 
                 # Subdominance relative to training demos
                 subdom_out = subdominance_loss_from_features(
@@ -296,7 +292,7 @@ class BaseModel(ABC, nn.Module):
                 mean_subdom = float(S.mean().item())
                 std_subdom = float(S.std().item())
 
-            zero_one_val = float(zero_one_loss.item()) if zero_one_loss is not None else np.nan
+            zero_one_val = pred_loss if pred_loss is not None else np.nan
             return {
                 "eval/zero_one_loss": zero_one_val,
                 "eval/mean_subdom": float(mean_subdom) if mean_subdom is not None else np.nan,
