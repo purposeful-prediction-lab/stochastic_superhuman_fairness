@@ -214,6 +214,7 @@ def set_all_seeds(seed: int = 0):
 
 
 def sample_logistic_model(cfg, seed=None):
+    '''Sample a logistic model to serve as a demonstrator. Vary Regulirization type, level, class weight.'''
     rng = np.random.default_rng(seed)
 
     solvers = ["lbfgs", "liblinear", "saga"]
@@ -227,7 +228,12 @@ def sample_logistic_model(cfg, seed=None):
     else:  # lbfgs
         penalty = "l2"
 
-    C = float(rng.lognormal(mean=0.0, sigma=1.0))  # wide variability
+    #  C = float(rng.lognormal(mean=0.0, sigma=1.0))  # wide variability
+    # vary regularization + class weights (clean)
+    C = 10 ** rng.uniform(-4, 4)  # 1e-4..1e4
+    cw = {0: float(10 ** rng.uniform(-0.5, 0.5)),
+          1: float(10 ** rng.uniform(-0.5, 0.5))}
+
     max_iter = int(rng.integers(0,10))
 
     l1_ratio = None
@@ -238,6 +244,7 @@ def sample_logistic_model(cfg, seed=None):
         solver=solver,
         penalty=penalty,
         C=C,
+        class_weight = cw,
         max_iter=max_iter,
         l1_ratio=l1_ratio,
         n_jobs=int(getattr(cfg, "lr_n_jobs", 1)),
@@ -245,3 +252,30 @@ def sample_logistic_model(cfg, seed=None):
     )
 
     return lr
+
+def sample_actions_from_policy(
+    policy,
+    X: torch.Tensor,
+    decision_threshold: float = None,
+    return_logits: bool = True,
+    return_probs: bool = False,
+    require_grad: bool = False,
+    **kwargs,
+):
+    """
+    If threshold is not None -> deterministic 0/1 via threshold. 
+    Else: Sample actions (labels) given the current parameters, using logits-> probs as the distribtuion.
+    Returns y_hat in {0,1} float tensor, shape [n], optional logits in [-inf, inf] and optional probs in [0,1]
+    """
+
+    ctx = torch.enable_grad() if require_grad else torch.no_grad()
+    with ctx:
+        logits = policy(X).squeeze(-1)
+        probs = torch.sigmoid(logits)
+
+        if decision_threshold is None:
+            y_hat = torch.bernoulli(probs)
+        else:
+            y_hat = (probs >= decision_threshold).float()
+        return (y_hat,) + (logits,)*return_logits + (probs,)*return_probs
+

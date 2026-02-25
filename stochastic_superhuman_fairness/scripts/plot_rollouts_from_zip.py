@@ -46,15 +46,16 @@ def main():
     ap.add_argument("--archive", required=True, help="Path to run.zip")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--phase", type=int, default=0)
-    ap.add_argument("--split", choices=["train", "test"], default="train")
-    ap.add_argument("--n_rollouts", type=int, default=None,
+    ap.add_argument("--split", choices=["train", "eval"], default="eval")
+    ap.add_argument("--n_rollouts", type=int, default=100,
                     help="Number of rollouts to collect (default: number of demos in split).")
     ap.add_argument("--dist_mode", default="per_param_diag",
                     help="Bayesian dist mode (if model supports bayesian rollouts).")
-    ap.add_argument("--threshold", type=float, default=None,
+    ap.add_argument("--decision_threshold", type=float, default=0.5,
                     help="Decision threshold for action sampling.")
     ap.add_argument("--pairs", default=None,
                     help='Optional pairs like "0,1;0,3;2,4"')
+    ap.add_argument("--stochastic", action="store_true", help="Enable stochastic label sampling for visualization.")
     ap.add_argument("--save_plot_dir", default=None,
                     help="If set, save plot here; otherwise saves next to archive.")
     ap.add_argument("--feat_vs_feats_name", default="all_features_vs_features.png")
@@ -71,8 +72,7 @@ def main():
         use_safe_load=True,
         overwrite_demos = False,
     )
-    import ipdb;ipdb.set_trace()
-    demos_all = demo.train_demos if args.split == "train" else demo.test_demos
+    demos_all = demo.train_demos if args.split == "train" else demo.eval_demos
     if demos_all is None or len(demos_all) == 0:
         raise RuntimeError(f"No demos found for split={args.split}")
 
@@ -92,7 +92,8 @@ def main():
     else:
         # Deterministic fallback: use the base collector if you exposed it, else minimal inline.
         if hasattr(model, "collect_eval_rollouts"):
-            rb = model.collect_eval_rollouts(demo, demos=demos_sel, decision_threshold=args.threshold)
+            rb = model.collect_eval_rollouts(demo, demos=demos_sel, decision_threshold=args.decision_threshold,
+                                             n_rollouts = args.n_rollouts, stochastic=args.stochastic)
             rollout_feats = rb.feats.detach().cpu().numpy()
         else:
             raise RuntimeError("Model has neither collect_bayesian_rollouts nor collect_eval_rollouts.")
@@ -103,17 +104,19 @@ def main():
     # Plot
     pairs = _parse_pairs(args.pairs)
     feature_names = getattr(model, "metrics_list", None)
-    title = f"{os.path.basename(args.archive)} | split={args.split} | R={n_rollouts} D={len(demos_all)}"
+    rtype = 'Stochastic' if args.stochastic else 'Deterministic'
+    title = f"{os.path.basename(args.archive)} | split={args.split} | R={n_rollouts}, {rtype} D={len(demos_all)}"
 
     alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
-    import ipdb;ipdb.set_trace()
+    #  alpha = 1.
+    #  import ipdb;ipdb.set_trace()
     fig, _axes = plot_rollouts_vs_demos(
         rollouts=rollout_feats,
         demos=demo_feats,
         feature_names=feature_names,
         pairs=pairs,
         title=title,
-        alpha=alpha,
+        #alpha=alpha,
         beta=None,
         return_artists=False,
     )

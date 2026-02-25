@@ -13,7 +13,7 @@ from stochastic_superhuman_fairness.core.fairness.subdominance import (
     compute_subdominance_matrix,
 )
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features, zero_one_loss
-from core.utils import flatten_dict
+from core.utils import flatten_dict, sample_actions_from_policy
 
 class BaseModel(ABC, nn.Module):
     """
@@ -77,9 +77,7 @@ class BaseModel(ABC, nn.Module):
         return self._train_one_epoch(demonstrator, no_update = False, **tkwargs)
 
     # ----------------------------------------------------------
-
-    @torch.no_grad()
-    def collect_rollouts(self, demonstrator, demos=None, decision_threshold=None):
+    def collect_training_rollouts(self, demonstrator, demos=None, decision_threshold: float=0.5, stochastic = True):
         if demos is None:
             demos = demonstrator.train_demos
         return collect_rollouts(
@@ -87,13 +85,31 @@ class BaseModel(ABC, nn.Module):
             demonstrator=demonstrator,
             demos=demos,
             metrics_list=self.metrics_list,
-            sample_actions_fn=self._sample_actions_from_probs,
+            sample_actions_fn=self.sample_actions,
             decision_threshold=decision_threshold,
-            before_demo=None,
+            stochatic = stochastic,
+            require_grad = True,
+            detach_outputs = False,
         )
-
     @torch.no_grad()
-    def collect_eval_rollouts(self, demonstrator, demos=None, decision_threshold=0.5):
+    def collect_rollouts(self, demonstrator, demos=None, decision_threshold: float=0.5, stochastic = True):
+        detach_outputs = require_grad
+        if demos is None:
+            demos = demonstrator.train_demos
+        return collect_rollouts(
+            policy=self.policy,
+            demonstrator=demonstrator,
+            demos=demos,
+            metrics_list=self.metrics_list,
+            sample_actions_fn=self.sample_actions,
+            decision_threshold=decision_threshold,
+            stochatic = stochastic,
+            require_grad = False,
+            detach_outputs = True,
+        )
+    @torch.no_grad()
+    def collect_eval_rollouts(self, demonstrator, demos=None, decision_threshold=0.5, n_rollouts: int = 10,
+                              stochastic : bool = False):
         if demos is None:
             demos = demonstrator.test_demos
         return collect_rollouts(
@@ -101,11 +117,12 @@ class BaseModel(ABC, nn.Module):
             demonstrator=demonstrator,
             demos=demos,
             metrics_list=self.metrics_list,
-            sample_actions_fn=self._sample_actions_from_probs,
+            n_rollouts = n_rollouts,
             decision_threshold=decision_threshold,
-            before_demo=None,
             require_grad=False,
             detach_outputs=True,
+            stochastic = stochastic,
+            sample_actions_fn=self.sample_actions, # <-- Use models sample fn
         )
     # ----------------------------------------------------------
     def get_state_dict(self):
@@ -241,6 +258,18 @@ class BaseModel(ABC, nn.Module):
     def apply_S_temperature(self, S, beta: float = 1.0):
         """Use before OT: S_beta = beta * S."""
         return beta * S
+
+    def sample_actions(
+        self,
+        X: torch.Tensor,
+        decision_threshold: float = None,
+        return_logits: bool = True,
+        return_probs: bool = False,
+        require_grad: bool = False
+    ):
+       # Genreal function from utils.py
+       return sample_actions_from_policy(self.policy, X, decision_threshold = decision_threshold,
+                             return_logits=return_logits, return_probs=return_probs,require_grad=require_grad)
 
     def evaluate(self, demonstrator, y_domain="01", decision_threshold: float = 0.5):
             """

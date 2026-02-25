@@ -326,20 +326,16 @@ class Demonstrator:
         for m in range(n_models):
             print('\n'+'-'*30 + f"Fitting logistic demonstrator {m}/{n_models}.")
 
-            idx = rng.choice(n, size=subset_size, replace=False)
-
-            #  lr = LogisticRegression(
-            #      max_iter=int(getattr(cfg, "lr_max_iter", 200)),
-            #      C=float(getattr(cfg, "lr_C", 1.0)),
-            #      solver=str(getattr(cfg, "lr_solver", "lbfgs")),
-            #      n_jobs=int(getattr(cfg, "lr_n_jobs", 1)),
-            #  )
+            # Sample a distinct logistic cclassifier
             lr = sample_logistic_model(cfg)
+            # Train on subset of data
+            idx = rng.choice(n, size=subset_size, replace=False)
             lr.fit(X[idx], y[idx])
-
+            # Make decisions  with different thresholds for variablity
             y_demo = lr.predict_proba(X)[:, 1].astype(np.float32)  # decisions on full set, returns probs
             #  import ipdb;ipdb.set_trace()
-            y_demo_zero_one = (lr.predict_proba(X)[:, 1] >= 0.5).astype(np.float32)
+            threshold = rng.uniform(0.35, 0.85)
+            y_demo_zero_one = (lr.predict_proba(X)[:, 1] >= threshold).astype(np.float32)
 
             fairness_feats = compute_fairness_features(
                 torch.as_tensor(y, dtype=torch.float32), # y_true

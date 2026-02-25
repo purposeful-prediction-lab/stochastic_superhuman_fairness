@@ -110,24 +110,7 @@ class LogisticRegressionModel(BaseModel):
         #  import ipdb;ipdb.set_trace()
         return g
 
-    # ----------------------------------------------------------
-    @torch.no_grad()
-    def sample_actions(self, X, threshold: float | None = None):
-        """
-        Returns (y_hat_prob, y_sampled).
-        If threshold is not None -> deterministic 0/1 via threshold.
-        Else -> stochastic Bernoulli sample per row.
-        """
-        import ipdb;ipdb.set_trace()
-        logits = self.policy(X).squeeze(-1)
-        p = torch.sigmoid(logits)
-        if threshold is not None:
-            y_samp = (p >= threshold).to(p.dtype)
-        else:
-            y_samp = torch.bernoulli(p)  # samples 0/1 with prob p
-
-        return p, y_samp
-
+    
     # ----------------------------------------------------------
     def _train_one_epoch(self, demonstrator, batch_size: int = 1, decision_threshold: float = None):
         device = self.device
@@ -156,7 +139,7 @@ class LogisticRegressionModel(BaseModel):
                 y_demo = demonstrator.get_targets(d).to(device)
                 A = d["A"].to(device)
 
-                P, y_hat = self.sample_actions(X, threshold = decision_threshold)
+                y_hat, P = self.sample_actions(X, threshold = decision_threshold, return_probs = True, require_grad=True)
 
                 zero_one_list.append(self.zero_one_loss(y_hat, y).item())
 
@@ -222,7 +205,8 @@ class LogisticRegressionModel(BaseModel):
     #      rollout_feats = []
     #      for d in demos:
     #          Xd, y, yd, Ad = d["X"], d['y'], demonstrator.get_targets(d), d["A"]
-    #          P, y_hat = self.sample_actions(Xd, threshold = decision_threshold)
+
+    #          y_hat, P = self.sample_actions(X, threshold = decision_threshold, return_probs = True, require_grad=True)
     #          #  logits = Xd.cpu().numpy() @ self.policy.weight.detach().cpu().numpy() + self.policy.bias.detach().cpu().numpy()
     #          f_r = compute_fairness_features(Xd, yd, y_hat, Ad, self.metrics_list)
     #          rollout_feats.append(f_r)
@@ -318,7 +302,7 @@ class LogisticRegressionModel(BaseModel):
         self,
         probs: torch.Tensor,
         threshold: float | None = None,
-    ):
+            ):
         """
         If threshold is None -> sample Bernoulli(probs).
         If threshold is provided:
