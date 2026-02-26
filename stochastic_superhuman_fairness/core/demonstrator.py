@@ -35,13 +35,18 @@ class Demonstrator:
         if auto_create:
             self.create_demos(to_torch = self.to_torch_flag)
             self._compute_standalone_demofeats()
-    #----------------------------------------------------------------------
+        #  import ipdb;ipdb.set_trace()
+
+    # --------------------------------------------------
+
     def _compute_standalone_demofeats(self):
         self.train_demo_feats = np.stack([d["fairness_feats"] for d in self.train_demos])  # [D,K]      
         self.eval_demo_feats = np.stack([d["fairness_feats"] for d in self.eval_demos])  # [D,K]      
         self.train_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.train_demo_feats)
         self.eval_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.eval_demo_feats)
-    #----------------------------------------------------------------------
+
+    # --------------------------------------------------
+
     def _resolve_defaults(self):
         dataset_name = self.cfg.demonstrator.dataset.lower()
         defaults = DEFAULT_DATA_CONFIGS.get(dataset_name, {})
@@ -55,6 +60,8 @@ class Demonstrator:
             self.cfg.data = NamespaceDict()
         for k in ["label_col", "protected_attrs", "sensitive_attrs", "normalize", "one_hot", "train_ratio"]:
             setattr(self.cfg.data, k, getattr(self.cfg.demonstrator, k, None))
+
+    # --------------------------------------------------
 
     def _resolve_metrics(self, cfg):
         """
@@ -93,6 +100,9 @@ class Demonstrator:
                 )
 
         return metrics
+
+    # --------------------------------------------------
+
     def _build_demo_name(self):
         cfg = self.cfg.demonstrator
         demotype = getattr(cfg, "demotype", "partition")
@@ -125,8 +135,23 @@ class Demonstrator:
                         d[k] = torch.as_tensor(v, dtype=torch.float32, device=device)
         self._torch_device = device
 
+    #-----------------------------------------------------------------------------------------------------------
+
     def get_metadata(self):
         return self.meta
+    
+    #-----------------------------------------------------------------------------------------------------------
+    def get_baseline_fairness_features(self):
+        if not hasattr(self, "baseline_fairness_features"):
+                       self._compute_baseline_fairness_features()
+        return self.baseline_fairness_features
+
+    def _compute_baseline_fairness_features(self):
+        self.baseline_fairness_features = {'oracle':self._compute_oracle_fairness(), 'majority': self._compute_majority_fairness(),
+                                  'random': self._compute_random_fairness(),
+                                  }
+
+    #-----------------------------------------------------------------------------------------------------------
 
     def create_demos(self, resample=False, to_torch: bool = True):
 
@@ -180,7 +205,7 @@ class Demonstrator:
 
         Xtr, Xte = ds["X_train"], ds["X_test"]
         ytr, yte = ds["y_train"], ds["y_test"]
-        Atr, Ate = ds.get("sensitive_train"), ds.get("sensitive_test")
+        Atr, Ate = ds.get("sensitive_train").astype(int), ds.get("sensitive_test").astype(int)
 
         if demotype == "lrdecisions":
             self.train_demos = self._create_demos_lrdecisions(Xtr, ytr, Atr, is_eval=False)
@@ -211,10 +236,11 @@ class Demonstrator:
             "n_models": getattr(dcfg, "n_models", None),
             "subset_ratio": getattr(dcfg, "subset_ratio", None),
             "subset_size": getattr(dcfg, "subset_size", None),
-            "lr_max_iter": getattr(dcfg, "lr_max_iter", None),
-            "lr_C": getattr(dcfg, "lr_C", None),
-            "lr_solver": getattr(dcfg, "lr_solver", None),
-            "lr_n_jobs": getattr(dcfg, "lr_n_jobs", None),
+            "baseline_fairness_features": self.get_baseline_fairness_features(),
+            #  "lr_max_iter": getattr(dcfg, "lr_max_iter", None),
+            #  "lr_C": getattr(dcfg, "lr_C", None),
+            #  "lr_solver": getattr(dcfg, "lr_solver", None),
+            #  "lr_n_jobs": getattr(dcfg, "lr_n_jobs", None),
         }
 
         self.meta = meta
@@ -235,6 +261,8 @@ class Demonstrator:
             self.to_torch(device=self.device)
 
         return out
+
+    # --------------------------------------------------
 
     def _load_dataset(self):
         dcfg = self.cfg.demonstrator
@@ -264,6 +292,8 @@ class Demonstrator:
 
         ds.update({"sensitive_train": A_train, "sensitive_test": A_test})
         return ds
+
+    # --------------------------------------------------
 
     def _partition(self, X, y, prot, resample=False):
         n = len(X)
@@ -296,7 +326,41 @@ class Demonstrator:
             })
         return demos
 
+    def _compute_random_fairness(self):
+        rng = np.random.default_rng()
+        rand_bin = (rng.random(self.train_demos[0]['y'].shape) > 0.5).astype(int)
+        return compute_fairness_features(
+                self.train_demos[0]['y'],
+                rand_bin,
+                self.train_demos[0]['A'],
+                self.cfg.get('demonstrator').get('metrics'))
 
+    def _compute_oracle_fairness(self):
+        return compute_fairness_features(
+                self.train_demos[0]['y'],
+                self.train_demos[0]['y'],
+                self.train_demos[0]['A'],
+                self.cfg.get('demonstrator').get('metrics'))
+
+    def _compute_majority_fairness(self):
+        majority_labels = np.ones_like(self.train_demos[0]['y']) if self.train_demos[0]['y'].mean() >= 0.5 else np.zeros_like(self.train_demos[0]['y'])
+        return compute_fairness_features(
+                self.train_demos[0]['y'],
+                majority_labels,
+                self.train_demos[0]['A'],
+                self.cfg.get('demonstrator').get('metrics'))
+
+    def _compute_fairness(self, demos):
+            metrics = self.cfg.demonstrator.metrics
+            results = []
+            for d in demos:
+                y_true = d["y"]
+                a = d["A"][:, 0] if d["A"] is not None else np.zeros_like(y_true)
+                y_pred = y_true
+                demo_metrics = {m: float(METRIC_REGISTRY[m](y_true, y_pred, a)) for m in metrics}
+                results.append(demo_metrics)
+            global_metrics = {m: float(np.mean([dm[m] for dm in results])) for m in metrics}
+            return {"local": results, "global": global_metrics}
 
     def _create_demos_lrdecisions(self, X, y, A, is_eval: bool = False):
 
@@ -386,6 +450,8 @@ class Demonstrator:
         print(f"🟢 Using cached demos for {self.cfg.demonstrator.dataset}")
         return False
 
+    # --------------------------------------------------
+
     def resample(self):
         """Explicit resampling call (increments sample ID and recreates demos)."""
         return self.create_demos(resample=True)
@@ -412,19 +478,7 @@ class Demonstrator:
                         d[k] = torch.as_tensor(d[k], dtype=torch.float32, device=device)
             yield batch
 
-    def _compute_fairness(self, demos):
-        metrics = self.cfg.demonstrator.metrics
-        results = []
-        for d in demos:
-            y_true = d["y"]
-            a = d["A"][:, 0] if d["A"] is not None else np.zeros_like(y_true)
-            y_pred = y_true
-            demo_metrics = {m: float(METRIC_REGISTRY[m](y_true, y_pred, a)) for m in metrics}
-            results.append(demo_metrics)
-        global_metrics = {m: float(np.mean([dm[m] for dm in results])) for m in metrics}
-        return {"local": results, "global": global_metrics}
-
-    # -----------------------------------------------------------------
+        # -----------------------------------------------------------------
     # Static Methods
     # -----------------------------------------------------------------
     @staticmethod

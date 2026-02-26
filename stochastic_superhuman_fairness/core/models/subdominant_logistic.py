@@ -46,7 +46,10 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         # optimizer (can be replaced externally)
         lr = float(self.cfg.get("train", {}).get("lr", 1e-3))
         wd = float(self.cfg.get("train", {}).get("weight_decay", 0.0))
-        self.optimizer = torch.optim.SGD(self.policies.parameters(), lr=lr, weight_decay=wd)
+        if self.cfg.get("train", {}).get('optimizer', 'sgd') == 'sgd':
+            self.optimizer = torch.optim.SGD(self.policies.parameters(), lr=lr, weight_decay=wd)
+        else:
+            self.optimizer = torch.optim.Adam(self.policies.parameters(), lr=lr, weight_decay=wd)
         #  import ipdb;ipdb.set_trace()
 
     def _clone_policy(self) -> nn.Module:
@@ -133,7 +136,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             logits_list.append(logits)
             yhat_list.append(yhat)
             # fairness feats use ground truth
-            f = compute_fairness_features(y_true, yhat, A, self.metrics_list)  # [K]
+            f = compute_fairness_features(y_true, yhat, A, self.metrics_list, weights = [1,1,1,1,10])  # [K]
             feat_list.append(f)
 
         logits_rollouts = torch.stack(logits_list, dim=0)    # [R,N]
@@ -177,6 +180,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             normalize_subdom=normalize_s_matrix,
             row_constraints=row_constraints,
         )
+
+        import ipdb;ipdb.set_trace()
         gamma = torch.tensor(out["gamma_np"], device=device, dtype=torch.float32)  # [R,D]
         #  weights = torch.tensor(gamma.sum(axis=1), device=device, dtype=torch.float32)  # [R]
 

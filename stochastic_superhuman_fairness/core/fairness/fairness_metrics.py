@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from typing import Union
 # ---------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------
@@ -13,52 +14,163 @@ def _safe_mean(arr):
 # ---------------------------------------------------------------------
 # Disparity Metrics
 # ---------------------------------------------------------------------
-def demographic_parity(y_pred, a):
-    """
-    |P(ŷ=1|A=0) - P(ŷ=1|A=1)|
-    If no model predictions exist, y_pred can be ground truth y.
-    """
-    p0 = _safe_mean(y_pred[a == 0])
-    p1 = _safe_mean(y_pred[a == 1])
-    return abs(p0 - p1)
+def _to_bool01(y: np.ndarray) -> np.ndarray:
+    """Convert labels to bool {0,1}."""
+    y = np.asarray(y).reshape(-1)
+    if np.issubdtype(y.dtype, np.floating):
+        return y > 0.5
+    return y > 0
 
-def equalized_odds(y_true, y_pred, a):
-    """
-    Average difference in TPR and FPR between groups.
-    |TPR0 - TPR1| + |FPR0 - FPR1| / 2
-    """
-    def rates(y_t, y_p, mask):
-        pos = y_t == 1
-        neg = y_t == 0
-        TPR = np.sum(y_p[pos & mask]) / max(np.sum(pos & mask), 1)
-        FPR = np.sum(y_p[neg & mask]) / max(np.sum(neg & mask), 1)
-        return TPR, FPR
+def _to_bool_a(a: np.ndarray) -> np.ndarray:
+    """Convert protected attribute to bool group indicator (a==1)."""
+    a = np.asarray(a).reshape(-1)
+    if np.issubdtype(a.dtype, np.floating):
+        return a > 0.5
+    return a > 0
 
-    TPR0, FPR0 = rates(y_true, y_pred, a == 0)
-    TPR1, FPR1 = rates(y_true, y_pred, a == 1)
-    return 0.5 * (abs(TPR0 - TPR1) + abs(FPR0 - FPR1))
+def _rate_with_smoothing(num: float, den: float, alpha: float) -> float:
+    """Laplace smoothing: (num + alpha) / (den + 2*alpha) for binary outcomes."""
+    return (num + alpha) / (den + 2.0 * alpha)
 
-def predictive_rate_parity(y_true, y_pred, a):
+def demographic_parity(y_pred, a, thresh: float = 0.5) -> float:
     """
-    |P(Y=1|A=0, ŷ=1) - P(Y=1|A=1, ŷ=1)|
+    |P(Ŷ=1|A=0) - P(Ŷ=1|A=1)|
     """
-    def precision(y_t, y_p, mask):
-        pred_pos = y_p == 1
-        return np.sum(y_t[pred_pos & mask]) / max(np.sum(pred_pos & mask), 1)
-    prec0 = precision(y_true, y_pred, a == 0)
-    prec1 = precision(y_true, y_pred, a == 1)
-    return abs(prec0 - prec1)
+    y_pred = np.asarray(y_pred).reshape(-1)
+    a1 = _to_bool_a(a)
+    y_hat = y_pred > thresh
 
-def prediction_error_disparity(y_true, a):
-    """
-    Label-imbalance proxy for prediction error disparity.
-    Interprets P(Y=1|A) as inverse of error rate.
-    """
-    err0 = 1 - _safe_mean(y_true[a == 0])
-    err1 = 1 - _safe_mean(y_true[a == 1])
-    return abs(err0 - err1)
+    # If a group is empty (rare), return 0 gap by convention.
+    n0 = (~a1).sum()
+    n1 = (a1).sum()
+    if n0 == 0 or n1 == 0:
+        return 0.0
 
-# Other Metrics ----------------------------------------------
+    p0 = y_hat[~a1].mean()
+    p1 = y_hat[a1].mean()
+    return float(abs(p0 - p1))
+
+def equalized_odds(y_true, y_pred, a, thresh: float = 0.5, alpha: float = 1.0) -> float:
+    """
+    0.5*(|TPR0-TPR1| + |FPR0-FPR1|) with Laplace smoothing on each rate.
+    """
+    y_pred = np.asarray(y_pred).reshape(-1)
+    y_true = np.asarray(y_true).reshape(-1)
+    a1 = _to_bool_a(a)
+
+    y_hat = y_pred > thresh
+    y = _to_bool01(y_true)
+
+    def tpr_fpr(group_mask: np.ndarray):
+        # TPR = P(Ŷ=1 | Y=1, A=g)
+        y_pos = group_mask & y
+        tp = float(np.sum(y_hat & y_pos))
+        pos = float(np.sum(y_pos))
+        tpr = _rate_with_smoothing(tp, pos, alpha)
+
+        # FPR = P(Ŷ=1 | Y=0, A=g)
+        y_neg = group_mask & (~y)
+        fp = float(np.sum(y_hat & y_neg))
+        neg = float(np.sum(y_neg))
+        fpr = _rate_with_smoothing(fp, neg, alpha)
+
+        return tpr, fpr
+
+    tpr0, fpr0 = tpr_fpr(~a1)
+    tpr1, fpr1 = tpr_fpr(a1)
+    eo = 0.5 * (abs(tpr0 - tpr1) + abs(fpr0 - fpr1))
+    return float(eo)
+
+def predictive_rate_parity(y_true, y_pred, a, thresh: float = 0.5, alpha: float = 1.0) -> float:
+    """
+    |PPV0 - PPV1| where PPV = P(Y=1 | Ŷ=1, A=g), smoothed.
+    PPV = (TP + alpha) / (PredPos + 2*alpha)
+    """
+    y_pred = np.asarray(y_pred).reshape(-1)
+    y_true = np.asarray(y_true).reshape(-1)
+    a1 = _to_bool_a(a)
+
+    y_hat = y_pred > thresh
+    y = _to_bool01(y_true)
+
+    def ppv(group_mask: np.ndarray):
+        pred_pos = group_mask & y_hat
+        tp = float(np.sum(pred_pos & y))
+        pp = float(np.sum(pred_pos))
+        return _rate_with_smoothing(tp, pp, alpha)
+
+    ppv0 = ppv(~a1)
+    ppv1 = ppv(a1)
+    return float(abs(ppv0 - ppv1))
+
+def prediction_error_disparity(y_true, y_pred, a, thresh: float = 0.5, alpha: float = 1.0) -> float:
+    """
+    |Err0 - Err1| where Err = P(Ŷ != Y | A=g), smoothed as a Bernoulli rate.
+    Err = (errors + alpha) / (n_group + 2*alpha)
+    """
+    y_pred = np.asarray(y_pred).reshape(-1)
+    y_true = np.asarray(y_true).reshape(-1)
+    a1 = _to_bool_a(a)
+
+    y_hat = y_pred > thresh
+    y = _to_bool01(y_true)
+    err = (y_hat != y)
+
+    def err_rate(group_mask: np.ndarray):
+        e = float(np.sum(err[group_mask]))
+        n = float(np.sum(group_mask))
+        return _rate_with_smoothing(e, n, alpha)
+
+    e0 = err_rate(~a1)
+    e1 = err_rate(a1)
+    return float(abs(e0 - e1))
+
+#==========
+#  def demographic_parity(y_pred, a):
+#      """
+#      |P(ŷ=1|A=0) - P(ŷ=1|A=1)|
+#      If no model predictions exist, y_pred can be ground truth y.
+#      """
+#      p0 = _safe_mean(y_pred[a == 0])
+#      p1 = _safe_mean(y_pred[a == 1])
+#      return abs(p0 - p1)
+#
+#  def equalized_odds(y_true, y_pred, a):
+#      """
+#      Average difference in TPR and FPR between groups.
+#      |TPR0 - TPR1| + |FPR0 - FPR1| / 2
+#      """
+#      def rates(y_t, y_p, mask):
+#          pos = y_t == 1
+#          neg = y_t == 0
+#          TPR = np.sum(y_p[pos & mask]) / max(np.sum(pos & mask), 1)
+#          FPR = np.sum(y_p[neg & mask]) / max(np.sum(neg & mask), 1)
+#          return TPR, FPR
+#
+#      TPR0, FPR0 = rates(y_true, y_pred, a == 0)
+#      TPR1, FPR1 = rates(y_true, y_pred, a == 1)
+#      return 0.5 * (abs(TPR0 - TPR1) + abs(FPR0 - FPR1))
+#
+#  def predictive_rate_parity(y_true, y_pred, a):
+#      """
+#      |P(Y=1|A=0, ŷ=1) - P(Y=1|A=1, ŷ=1)|
+#      """
+#      def precision(y_t, y_p, mask):
+#          pred_pos = y_p == 1
+#          return np.sum(y_t[pred_pos & mask]) / max(np.sum(pred_pos & mask), 1)
+#      prec0 = precision(y_true, y_pred, a == 0)
+#      prec1 = precision(y_true, y_pred, a == 1)
+#      return abs(prec0 - prec1)
+#
+#  def prediction_error_disparity(y_true, y_pred, a):
+#      """
+#      Difference in total error rate across groups.
+#      """
+#      err0 = _safe_mean((y_pred != y_true)[a == 0])
+#      err1 = _safe_mean((y_pred != y_true)[a == 1])
+#      return abs(err0 - err1)
+#
+#  # Other Metrics ----------------------------------------------
 def zero_one_loss(y_true, y_pred, *args, decision_threshold: float = 0.5):
     """
     Mean zero-one loss.
@@ -88,53 +200,180 @@ def zero_one_loss(y_true, y_pred, *args, decision_threshold: float = 0.5):
 # ============================================================
 # TORCH VERSIONS (fully differentiable)
 # ============================================================
+def _to_bool01_torch(y: torch.Tensor) -> torch.Tensor:
+    """Convert labels to bool {0,1}."""
+    y = y.view(-1)
+    if y.is_floating_point():
+        return (y > 0.5)
+    return (y > 0)
 
+def _to_bool_a_torch(a: torch.Tensor) -> torch.Tensor:
+    """Convert protected attribute to bool group indicator (a==1)."""
+    try:
+        return (a.view(-1) > 0)
+    except:
+        import ipdb;ipdb.set_trace()
 
-def _torch_safe_mean(x):
-    return x.float().mean() if x.numel() > 0 else torch.tensor(0.0, device=x.device)
+def _rate_with_smoothing_torch(num: torch.Tensor, den: torch.Tensor, alpha: float) -> torch.Tensor:
+    """Laplace smoothing: (num + alpha) / (den + 2*alpha) for binary outcomes."""
+    return (num + alpha) / (den + 2.0 * alpha)
 
+def demographic_parity_torch(y_pred, a, thresh: float = 0.5) -> torch.Tensor:
+    """
+    |P(Ŷ=1|A=0) - P(Ŷ=1|A=1)|  (no smoothing needed, but you can add if desired)
+    """
+    y_pred = y_pred.view(-1)
+    a1 = _to_bool_a_torch(a)
+    y_hat = (y_pred > thresh)
 
-def demographic_parity_torch(y_pred, a):
-    g0 = (a == 0)
-    g1 = (a == 1)
-    p0 = _torch_safe_mean(y_pred[g0.squeeze()])
-    p1 = _torch_safe_mean(y_pred[g1.squeeze()])
-    return (p0 - p1).abs()
+    p0 = y_hat[~a1].float().mean()
+    p1 = y_hat[a1].float().mean()
+    return torch.abs(p0 - p1)
 
+def equalized_odds_torch(y_true, y_pred, a, thresh: float = 0.5, alpha: float = 1.0) -> torch.Tensor:
+    """
+    0.5*(|TPR0-TPR1| + |FPR0-FPR1|) with Laplace smoothing on each rate.
+    """
+    y_pred = y_pred.view(-1)
+    y_true = y_true.view(-1)
+    a1 = _to_bool_a_torch(a)
 
-def equalized_odds_torch(y_true, y_pred, a):
-    y_bin = (y_pred > 0.5).float()
-    def rates(y_t, y_p, mask):
-        mask = mask.squeeze(-1)
-        pos = (y_t == 1) & mask
-        neg = (y_t == 0) & mask
-        TPR = _torch_safe_mean(y_p[pos])
-        FPR = _torch_safe_mean(y_p[neg])
-        return TPR, FPR
+    y_hat = (y_pred > thresh)
+    y = _to_bool01_torch(y_true)
 
-    TPR0, FPR0 = rates(y_true, y_bin, a == 0)
-    TPR1, FPR1 = rates(y_true, y_bin, a == 1)
-    return ((TPR0 - TPR1).abs() + (FPR0 - FPR1).abs()) * 0.5
+    def tpr_fpr(group_mask: torch.Tensor):
+        # TPR = P(Ŷ=1 | Y=1, A=g)
+        y_pos = group_mask & y
+        tp = (y_hat & y_pos).sum().float()
+        pos = y_pos.sum().float()
+        tpr = _rate_with_smoothing_torch(tp, pos, alpha)
 
+        # FPR = P(Ŷ=1 | Y=0, A=g)
+        y_neg = group_mask & (~y)
+        fp = (y_hat & y_neg).sum().float()
+        neg = y_neg.sum().float()
+        fpr = _rate_with_smoothing_torch(fp, neg, alpha)
+        return tpr, fpr
 
-def predictive_rate_parity_torch(y_true, y_pred, a):
-    y_bin = (y_pred > 0.5).float()
+    tpr0, fpr0 = tpr_fpr(~a1)
+    tpr1, fpr1 = tpr_fpr(a1)
+    return 0.5 * (torch.abs(tpr0 - tpr1) + torch.abs(fpr0 - fpr1))
 
-    def precision(y_t, y_p, mask):
-        mask = mask.squeeze(-1)
-        pred_pos = (y_p == 1) & mask
-        return _torch_safe_mean(y_t[pred_pos])
+def predictive_rate_parity_torch(y_true, y_pred, a, thresh: float = 0.5, alpha: float = 1.0) -> torch.Tensor:
+    """
+    |PPV0 - PPV1| where PPV = P(Y=1 | Ŷ=1, A=g), smoothed.
+    PPV = (TP + alpha) / (PredPos + 2*alpha)
+    """
+    y_pred = y_pred.view(-1)
+    y_true = y_true.view(-1)
+    a1 = _to_bool_a_torch(a)
 
-    prec0 = precision(y_true, y_bin, a == 0)
-    prec1 = precision(y_true, y_bin, a == 1)
-    return (prec0 - prec1).abs()
+    y_hat = (y_pred > thresh)
+    y = _to_bool01_torch(y_true)
 
+    def ppv(group_mask: torch.Tensor):
+        pred_pos = group_mask & y_hat
+        tp = (pred_pos & y).sum().float()
+        pp = pred_pos.sum().float()
+        return _rate_with_smoothing_torch(tp, pp, alpha)
 
-def prediction_error_disparity_torch(y_true, a):
-    err0 = 1 - _torch_safe_mean(y_true[a == 0])
-    err1 = 1 - _torch_safe_mean(y_true[a == 1])
-    return (err0 - err1).abs()
+    ppv0 = ppv(~a1)
+    ppv1 = ppv(a1)
+    return torch.abs(ppv0 - ppv1)
 
+def prediction_error_disparity_torch(y_true, y_pred, a, thresh: float = 0.5, alpha: float = 1.0) -> torch.Tensor:
+    """
+    |Err0 - Err1| where Err = P(Ŷ != Y | A=g), smoothed as a Bernoulli rate.
+    Err = (errors + alpha) / (n_group + 2*alpha)
+    """
+    y_pred = y_pred.view(-1)
+    y_true = y_true.view(-1)
+    a1 = _to_bool_a_torch(a)
+
+    y_hat = (y_pred > thresh)
+    y = _to_bool01_torch(y_true)
+    err = (y_hat != y)
+
+    def err_rate(group_mask: torch.Tensor):
+        e = err[group_mask].sum().float()
+        n = group_mask.sum().float()
+        return _rate_with_smoothing_torch(e, n, alpha)
+
+    e0 = err_rate(~a1)
+    e1 = err_rate(a1)
+    return torch.abs(e0 - e1)
+#=========
+#
+#  def _torch_safe_mean(x):
+#      return x.float().mean() if x.numel() > 0 else torch.tensor(0.0, device=x.device)
+#
+#
+#  def demographic_parity_torch(y_pred, a):
+#      g0 = (a == 0)
+#      g1 = (a == 1)
+#      p0 = _torch_safe_mean(y_pred[g0.squeeze()])
+#      p1 = _torch_safe_mean(y_pred[g1.squeeze()])
+#      return (p0 - p1).abs()
+#
+#  def _mean_or_nan(x: torch.Tensor) -> torch.Tensor:
+#      return x.mean() if x.numel() > 0 else torch.tensor(float("nan"), device=x.device)
+#
+#  def equalized_odds_torch(y_true, y_pred, a):
+#      # Flatten to [N]
+#      y_pred = y_pred.view(-1)
+#      y_true = y_true.view(-1)
+#      a = a.view(-1)
+#
+#      # Binarize
+#      y_hat = (y_pred > 0.5)
+#      y = (y_true > 0.5) if y_true.is_floating_point() else (y_true > 0)
+#
+#      def rates(group_val: int):
+#          g = (a == group_val)
+#          pos = g & (y == 1)
+#          neg = g & (y == 0)
+#          tpr = _mean_or_nan(y_hat[pos].float())
+#          fpr = _mean_or_nan(y_hat[neg].float())
+#          return tpr, fpr
+#
+#      tpr0, fpr0 = rates(0)
+#      tpr1, fpr1 = rates(1)
+#
+#      eo = 0.5 * (torch.abs(tpr0 - tpr1) + torch.abs(fpr0 - fpr1))
+#      return eo
+#
+#  def equalized_odds_torch_old(y_true, y_pred, a):
+#      y_bin = (y_pred > 0.5).float()
+#      def rates(y_t, y_p, mask):
+#          mask = mask.squeeze(-1)
+#          pos = (y_t == 1) & mask
+#          neg = (y_t == 0) & mask
+#          TPR = _torch_safe_mean(y_p[pos])
+#          FPR = _torch_safe_mean(y_p[neg])
+#          return TPR, FPR
+#
+#      TPR0, FPR0 = rates(y_true, y_bin, a == 0)
+#      TPR1, FPR1 = rates(y_true, y_bin, a == 1)
+#      return ((TPR0 - TPR1).abs() + (FPR0 - FPR1).abs()) * 0.5
+#
+#
+#  def predictive_rate_parity_torch(y_true, y_pred, a):
+#      y_bin = (y_pred > 0.5).float()
+#
+#      def precision(y_t, y_p, mask):
+#          mask = mask.squeeze(-1)
+#          pred_pos = (y_p == 1) & mask
+#          return _torch_safe_mean(y_t[pred_pos])
+#
+#      prec0 = precision(y_true, y_bin, a == 0)
+#      prec1 = precision(y_true, y_bin, a == 1)
+#      return (prec0 - prec1).abs()
+#
+#  def prediction_error_disparity_torch(y_true, y_pred, a):
+#      err0 = _torch_safe_mean((y_pred != y_true)[a == 0])
+#      err1 = _torch_safe_mean((y_pred != y_true)[a == 1])
+#      return (err0 - err1).abs()
+#
 # Other Metrics ----------------------------------------------
 def zero_one_loss_torch(y_true, y_pred):
     """
@@ -211,10 +450,52 @@ FAIRNESS_REGISTRY = {
     "L.ZeroOne": (zero_one_loss, zero_one_loss_torch),
 }
 
+def compute_fairness_features(
+    y_true, y_pred, a,
+    metrics=["D.DP", "D.EqOdds", "D.PRP", "D.Err"],
+    X=None,
+    weights: Union[list, np.ndarray, torch.Tensor] = None,
+):
+    feats = []
+    use_torch = _is_torch(y_pred)
+    a = a.squeeze(-1)
 
-def compute_fairness_features(y_true, y_pred, a, 
+    for m in metrics:
+        f_np, f_torch = FAIRNESS_REGISTRY[m]
+        if (m == "D.PRP") or (m == "D.EqOdds") or (m == "D.Err"):
+            fargs = (y_true, y_pred, a)
+        elif m == "L.ZeroOne":
+            fargs = (y_true, y_pred)
+        else:
+            fargs = (y_pred, a)
+
+        feats.append(f_torch(*fargs) if use_torch else f_np(*fargs))
+
+    # stack in correct backend
+    if use_torch:
+        feats_vec = torch.stack(feats)
+    else:
+        feats_vec = np.array(feats, dtype=np.float32)
+
+    # apply weights (same backend) if provided
+    if weights is not None:
+        if len(weights) != len(metrics):
+            raise ValueError(f"weights must have length {len(metrics)} (got {len(weights)})")
+
+        if use_torch:
+            w = weights if torch.is_tensor(weights) else torch.tensor(weights, dtype=feats_vec.dtype, device=feats_vec.device)
+            w = w.to(dtype=feats_vec.dtype, device=feats_vec.device)
+            feats_vec = feats_vec * w
+        else:
+            w = weights.detach().cpu().numpy() if torch.is_tensor(weights) else np.asarray(weights, dtype=feats_vec.dtype)
+            feats_vec = feats_vec * w
+
+    return feats_vec
+
+def compute_fairness_features_old(y_true, y_pred, a, 
     metrics = ["D.DP", "D.EqOdds", "D.PRP", "D.Err"],
     X = None,
+    weights: Union[list, np.ndarray, torch.Tensor] = None,
     ):
     """
     Automatically picks numpy OR torch implementation.
@@ -253,6 +534,6 @@ METRIC_REGISTRY = {
     "D.DP": lambda y_true, y_pred, a: demographic_parity(y_pred, a),
     "D.EqOdds": equalized_odds,
     "D.PRP": predictive_rate_parity,
-    "D.Err": lambda y_true, y_pred, a: prediction_error_disparity(y_true, a),
+    "D.Err": lambda y_true, y_pred, a: prediction_error_disparity(y_true, y_pred, a),
     "L.ZeroOne": zero_one_loss,
 }

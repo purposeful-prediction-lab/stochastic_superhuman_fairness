@@ -107,8 +107,8 @@ def main():
     rtype = 'Stochastic' if args.stochastic else 'Deterministic'
     title = f"{os.path.basename(args.archive)} | split={args.split} | R={n_rollouts}, {rtype} D={len(demos_all)}"
 
-    alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
-    #  alpha = 1.
+    #  alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
+    alpha = 1.
     #  import ipdb;ipdb.set_trace()
     fig, _axes = plot_rollouts_vs_demos(
         rollouts=rollout_feats,
@@ -119,6 +119,7 @@ def main():
         #alpha=alpha,
         beta=None,
         return_artists=False,
+        baseline_fairness = demo.meta['baseline_fairness_features'],
     )
 
     # Save
@@ -133,6 +134,7 @@ def main():
         demos_all,
         feature_names=feature_names,
         alpha=alpha,          # (K,) or (K+1,) if you want y-alpha too
+        baseline_fairness = demo.meta['baseline_fairness_features'],
     )
     # Save
     out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
