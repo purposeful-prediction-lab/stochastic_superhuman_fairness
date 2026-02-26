@@ -69,7 +69,9 @@ def plot_rollouts_vs_demos(
     K = rollouts.shape[1]
     if K < 2:
         raise ValueError("K must be >= 2.")
-
+    # Compute rollout mean once per call
+    rollout_mean = compute_feature_means(rollouts)  # [K]
+    demo_mean    = compute_feature_means(demos)     # [K]   # NEW
     if feature_names is None:
         feature_names = [f"f{i}" for i in range(K)]
     if len(feature_names) != K:
@@ -113,25 +115,27 @@ def plot_rollouts_vs_demos(
     artists = [] if return_artists else None
 
     def _scatter(ax, i, j):
+         # demos: opaque
+        sc_d = ax.scatter(
+            demos[:, j], demos[:, i],
+            s=s_demos,
+            marker=marker_demos,
+            label=demo_label,
+            alpha=0.45,
+            zorder=2,
+        )
         # rollouts: semi-transparent
         sc_r = ax.scatter(
             rollouts[:, j], rollouts[:, i],
             s=s_rollouts,
             marker=marker_rollouts,
             label=rollout_label,
-            alpha=0.35,
+            alpha=0.75,
             zorder=1,
+            color = 'orange'
         )
 
-        # demos: opaque
-        sc_d = ax.scatter(
-            demos[:, j], demos[:, i],
-            s=s_demos,
-            marker=marker_demos,
-            label=demo_label,
-            alpha=1.0,
-            zorder=2,
-        )
+       
         baseline_artists = []
         for name, B in baseline_data:
             sc_b = ax.scatter(
@@ -172,13 +176,33 @@ def plot_rollouts_vs_demos(
             lw=1.6,
             zorder=8,   # keep it above everything
         )
+        # NEW: demo mean point (no guides)
+        demo_mean_x = float(demo_mean[j])
+        demo_mean_y = float(demo_mean[i])
+        sc_md = ax.scatter(
+            demo_mean_x, demo_mean_y,
+            s=70,
+            marker="o",
+            color="cyan",
+            label="mean_demos",
+            zorder=9,
+        )
 
+        # label rollout mean explicitly (so it appears in legend)
+        ax.scatter(
+            mean_x, mean_y,
+            s=70,
+            marker="o",
+            color="red",
+            label="mean_rollouts",
+            zorder=9,
+        )
         # Labels
         ax.set_xlabel(feature_names[j])
         ax.set_ylabel(feature_names[i])
 
         #  return sc_r, sc_d
-        return sc_r, sc_d, baseline_artists
+        return sc_r, sc_d, baseline_artists, sc_md 
     # -------------------------
     # Explicit pairs mode
     # -------------------------
@@ -197,10 +221,10 @@ def plot_rollouts_vs_demos(
 
         for ax, (i, j) in zip(axes, pairs):
             #  sc_r, sc_d = _scatter(ax, i, j)
-            sc_r, sc_d, sc_bs = _scatter(ax, i, j)
+            sc_r, sc_d, sc_bs, sc_md = _scatter(ax, i, j)
             if return_artists:
                 #  artists.append({"pair": (i, j), "rollouts": sc_r, "demos": sc_d})
-                artists.append({"pair": (i, j), "rollouts": sc_r, "demos": sc_d, "baselines": sc_bs})
+                artists.append({"pair": (i, j), "rollouts": sc_r, "demos": sc_d, "baselines": sc_bs, 'mean_demos': sc_md})
 
         for ax in axes[len(pairs):]:
             ax.axis("off")
@@ -218,7 +242,8 @@ def plot_rollouts_vs_demos(
     # -------------------------
     if K == 2:
         fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-        sc_r, sc_d = _scatter(ax, 0, 1)
+        #  sc_r, sc_d = _scatter(ax, 0, 1)
+        sc_r, sc_d, sc_bs, sc_md = _scatter(ax, 0, 1)
         ax.legend()
         if title:
             ax.set_title(title)
@@ -240,9 +265,10 @@ def plot_rollouts_vs_demos(
             if x_feat <= y_feat:
                 ax.axis("off")
                 continue
-            sc_r, sc_d, sc_bs = _scatter(ax, y_feat, x_feat)
+            #  sc_r, sc_d, sc_bs = _scatter(ax, y_feat, x_feat)
+            sc_r, sc_d, sc_bs, sc_md = _scatter(ax, y_feat, x_feat)
             if return_artists:
-                artists.append({"pair": (i, j), "rollouts": sc_r, "demos": sc_d, "baselines": sc_bs})
+                artists.append({"pair": (i, j), "rollouts": sc_r, "demos": sc_d, "baselines": sc_bs, 'mean_demos': sc_md})
                 #  artists.append({"pair": (y_feat, x_feat), "rollouts": sc_r, "demos": sc_d})
 
     # legend on first active axis
@@ -295,7 +321,23 @@ def plot_zero_one_vs_features_subplots(
 
     Xr = Rall[:, :K_feat]
     yr = Rall[:, K_feat]
+    # Compute rollout mean once per call
+    #  rollout_mean = compute_feature_means(rollouts)  # [K]
+    #  demo_mean    = compute_feature_means(demos)     # [K]   # NEW
+    # ----- alphas ------
+    alpha_x = None   # (K_feat,)
+    alpha_y = None   # scalar for zero-one
 
+    if alpha is not None:
+        a = alpha.detach().cpu().numpy() if torch.is_tensor(alpha) else np.asarray(alpha, dtype=float)
+
+        if a.ndim == 0:  # scalar -> repeat for all features + zero-one
+            a = np.full((K_feat + 1,), float(a), dtype=float)
+        else:
+            a = a.reshape(-1)
+
+    alpha_x = a[:K_feat]
+    alpha_y = float(a[K_feat])
     # ----- demos -----
     Xd_list, yd_list = [], []
     for d in demos:
@@ -343,6 +385,18 @@ def plot_zero_one_vs_features_subplots(
 
         # baselines
         sc_b_list = []
+        baseline_palette = [
+            "#66a61e",  # green
+            'black'  ,  # black
+            "#e7298a",  # magenta
+            "#7570b3",  # muted purple
+            "#a6761d",  # brown
+            "#1b9e77",  # deep teal
+            "#666666",  # dark gray
+            "#8c6bb1",  # soft violet
+            "#2b8cbe",  # steel blue (NOT bright blue)
+        ]
+        c = 0
         for name, bf, bz in baselines:
             marker_char = f"${name[0].upper()}$"
 
@@ -354,7 +408,9 @@ def plot_zero_one_vs_features_subplots(
                 alpha=baseline_alpha,
                 label=name,
                 zorder=4,
+                color = baseline_palette[c]
             )
+            c += 1
             sc_b_list.append(sc_b)
         # ----- means -----
         mx_r = float(np.mean(Xr[:, k]))
@@ -392,6 +448,42 @@ def plot_zero_one_vs_features_subplots(
         ax.plot([mx_r, xmax], [my_r, my_r], lw=1.5, zorder=3, color = 'red')
         ax.plot([mx_r, mx_r], [my_r, ymax], lw=1.5, zorder=3, color = 'red')
 
+        # --- alpha guide lines: x = 1/alpha_k, y = 1/alpha_zeroone ---
+        if alpha_x is not None:
+            x_alpha = 1.0 / max(1e-12, float(alpha_x[k]))
+            ax.axvline(x_alpha, linestyle="--", linewidth=1.5, color="red", zorder=3)
+
+            # double dashed arrow from rollout-mean vertical (x=mx_r) to x_alpha line
+            xmin, xmax = ax.get_xlim()
+            ymin, ymax = ax.get_ylim()
+            y_span = max(1e-12, ymax - ymin)
+            dy = 0.04 * y_span
+            y_arrow = my_r + dy
+
+            ax.annotate(
+                "",
+                xy=(x_alpha, y_arrow),
+                xytext=(mx_r, y_arrow),
+                arrowprops=dict(arrowstyle="<->", linestyle="--", color="lightgray", lw=1.4),
+                zorder=6,
+                clip_on=False,
+            )
+            ax.annotate(
+                f"alpha_{feature_names[k]}",
+                xy=((mx_r + x_alpha) / 2, y_arrow),
+                xytext=(0, 6),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color="gray",
+                zorder=7,
+                clip_on=False,
+            )
+
+            # y = 1/alpha_zeroone (same across subplots)
+            y_alpha = 1.0 / max(1e-12, float(alpha_y))
+            ax.axhline(y_alpha, linestyle="--", linewidth=1.5, color="red", zorder=3)
         ax.set_xlabel(feature_names[k])
         ax.set_ylabel("zero_one_loss")
         ax.grid(True, alpha=0.2)
@@ -422,263 +514,3 @@ def plot_zero_one_vs_features_subplots(
 
     return (fig, axes, artists) if return_artists else (fig, axes)
 # -----------------------------------------------------------------------------------------------
-
-def plot_zero_one_vs_features_subplots_old(
-    rb,                          # RolloutBatch-like
-    demos,                       # list[dict] with keys incl. 'fairness_feats', 'zero_one_loss'
-    *,
-    feature_names=None,          # list[str] length K
-    alpha=None,                  # None, scalar, (K,), (K+1,), or (R,K) (we reduce to per-feature mean)
-    title=None,
-    rollout_label="rollouts",
-    demo_label="demos",
-    s_rollouts=12,
-    s_demos=28,
-    marker_rollouts="o",
-    marker_demos="x",
-    figsize_per_ax=(4.0, 3.5),
-    return_artists: bool = False,
-    baseline_fairness: dict = None,   
-):
-    """
-    Make a single figure with K subplots. Subplot k shows:
-        x = rollout/demo feature k
-        y = zero_one_loss
-
-    Rollouts come from:
-        x_r = rb.feats[:,k]
-        y_r = rb.zero_one_losses (length R)
-
-    Demos come from list of dicts:
-        x_d = demo['fairness_feats'][k]
-        y_d = demo['zero_one_loss']
-
-    Annotations (like plot_rollouts_vs_demos):
-      - bold rollout-mean dot + solid guides to right/up
-      - inverse-alpha origin at (1/alpha_x, 1/alpha_y) with rays right/up
-      - dotted <-> arrows (offset) from mean to inverse-alpha point + labels
-
-    Alpha handling:
-      - alpha is scalar -> broadcast to K (x only; no y alpha unless K+1 provided)
-      - alpha is (K,) -> x alpha for each subplot; no y alpha
-      - alpha is (K+1,) -> last entry is alpha_loss (used as y alpha for all subplots)
-      - alpha is (R,K) -> reduced to per-feature mean for x alpha; y alpha from (K+1) not applicable
-
-    Returns:
-      (fig, axes) or (fig, axes, artists)
-    """
-    # --- pull rollouts to numpy ---
-    feats = rb.feats
-    Xr = feats.detach().cpu().numpy() if torch.is_tensor(feats) else np.asarray(feats)
-    y_r = rb.zero_one_losses
-    y_r = y_r.detach().cpu().numpy() if torch.is_tensor(y_r) else np.asarray(y_r, dtype=float)
-
-    R, K = Xr.shape
-    if y_r.shape[0] != R:
-        raise ValueError(f"rb.zero_one_losses must have length R={R}. Got {y_r.shape[0]}.")
-
-    if feature_names is None:
-        feature_names = [f"f{i}" for i in range(K)]
-    if len(feature_names) != K:
-        raise ValueError(f"feature_names must have length K={K}.")
-
-    # --- demos to numpy arrays (DxK) and (D,) ---
-    Xd_list, yd_list = [], []
-    for d in demos:
-        ff = d.get("fairness_feats", None)
-        zl = d.get("zero_one_loss", None)
-        if ff is None or zl is None:
-            continue
-        ff = ff.detach().cpu().numpy() if torch.is_tensor(ff) else np.asarray(ff, dtype=float)
-        ff = ff.reshape(-1)
-        if ff.size != K:
-            raise ValueError(f"demo fairness_feats has size {ff.size}, expected K={K}.")
-        Xd_list.append(ff)
-        yd_list.append(float(zl))
-
-    baseline_series = []
-    if baseline_fairness is not None:
-        if not isinstance(baseline_fairness, dict):
-            raise TypeError("baseline_fairness must be a dict[label -> (X,y) or dict]")
-        for name, val in baseline_fairness.items():
-            Xb = val[0:-1]
-            yb = val[-1]
-
-            if Xb is None or yb is None:
-                raise ValueError(f"Baseline '{name}' must include fairness_feats and zero_one_loss.")
-
-            Xb = Xb.detach().cpu().numpy() if torch.is_tensor(Xb) else np.asarray(Xb, dtype=float)
-            yb = yb.detach().cpu().numpy() if torch.is_tensor(yb) else np.asarray(yb, dtype=float)
-
-            if Xb.ndim == 1:
-                if Xb.size != K-1: raise ValueError(f"Baseline '{name}' fairness_feats size must be K={K-1}. Got {Xb.size}.")
-                Xb = Xb[None, :]
-            if yb.ndim == 0:
-                yb = np.full((Xb.shape[0],), float(yb))
-            if Xb.shape[0] != yb.shape[0]:
-                raise ValueError(f"Baseline '{name}': fairness_feats rows {Xb.shape[0]} != zero_one_loss {yb.shape[0]}")
-
-            baseline_series.append((name, Xb, yb))
-    Xd = np.stack(Xd_list, axis=0) if len(Xd_list) else np.zeros((0, K), dtype=float)
-    y_d = np.asarray(yd_list, dtype=float) if len(yd_list) else np.zeros((0,), dtype=float)
-
-    # --- alpha parsing ---
-    alpha_x = None
-    alpha_y = None  # for zero_one_loss axis
-
-    if alpha is not None:
-        a = alpha
-        if torch.is_tensor(a):
-            a = a.detach().cpu().numpy()
-        a = np.asarray(a, dtype=float)
-
-        if a.ndim == 0:  # scalar
-            alpha_x = np.full(K, float(a))
-        elif a.ndim == 1:
-            if a.size == K:
-                alpha_x = a
-            elif a.size == K + 1:
-                alpha_x = a[:K]
-                alpha_y = float(a[-1])
-            else:
-                raise ValueError(f"alpha 1D must be size K={K} or K+1={K+1}. Got {a.size}.")
-        elif a.ndim == 2:
-            if a.shape != (R, K):
-                raise ValueError(f"alpha 2D must be shape (R,K)={(R,K)}. Got {a.shape}.")
-            alpha_x = np.nanmean(a, axis=0)  # reduce to per-feature for plotting
-        else:
-            raise ValueError("alpha must be scalar, (K,), (K+1,), or (R,K).")
-
-    # --- layout ---
-    ncols = int(math.ceil(math.sqrt(K)))
-    nrows = int(math.ceil(K / ncols))
-    fig, axes = plt.subplots(
-        nrows, ncols,
-        figsize=(figsize_per_ax[0] * ncols, figsize_per_ax[1] * nrows),
-        squeeze=False
-    )
-    axes_flat = axes.ravel()
-
-    artists = [] if return_artists else None
-
-    for k in range(K):
-        ax = axes_flat[k]
-
-        # scatter: rollouts + demos
-        sc_r = ax.scatter(
-            Xr[:, k], y_r,
-            s=s_rollouts,
-            marker=marker_rollouts,
-            alpha=0.35,
-            label=rollout_label,
-            zorder=1,
-        )
-        sc_d = ax.scatter(
-            Xd[:, k], y_d,
-            s=s_demos,
-            marker=marker_demos,
-            alpha=1.0,
-            label=demo_label,
-            zorder=2,
-        )
-        #  baseline_artists = []
-        for name, Xb, yb in baseline_series:
-            sc_b = ax.scatter(
-                Xb[:, k], yb,
-                s=s_demos,
-                marker="^",
-                alpha=1.0,
-                label=name,
-                zorder=3,
-            )
-            #  baseline_artists.append(sc_b)
-
-        # ensure limits include scatters
-        ax.autoscale(enable=True, axis="both", tight=False)
-
-        # rollout mean point
-        mean_x = float(np.nanmean(Xr[:, k]))
-        mean_y = float(np.nanmean(y_r))
-
-        # inverse-alpha annotations (full if alpha_y provided, else x-only)
-        if alpha_x is not None:
-            inv_x = 1.0 / max(1e-12, float(alpha_x[k]))
-
-            if alpha_y is not None:
-                inv_y = 1.0 / max(1e-12, float(alpha_y))
-                annotate_inverse_alpha_arrows(
-                    ax,
-                    mean_x=mean_x,
-                    mean_y=mean_y,
-                    inv_alpha_x=inv_x,
-                    inv_alpha_y=inv_y,
-                    x_name=feature_names[k],
-                    y_name="zero_one",
-                )
-            else:
-                # x-only version: vertical ray at inv_x and offset <-> arrow from mean_x to inv_x
-                # (keeps “same style” but avoids inventing alpha for loss)
-                xmin, xmax = ax.get_xlim()
-                ymin, ymax = ax.get_ylim()
-                ax.set_xlim(min(xmin, inv_x), max(xmax, inv_x))
-                xmin, xmax = ax.get_xlim()
-                x_span = max(1e-12, xmax - xmin)
-                y_span = max(1e-12, ymax - ymin)
-                dy = 0.03 * y_span
-
-                # ray to the right at y=mean_y (visual "margin")
-                ax.plot([inv_x, xmax], [mean_y, mean_y], lw=1.4, zorder=6)
-
-                # arrow (offset from mean guides)
-                ax.annotate(
-                    "",
-                    xy=(inv_x, mean_y + dy),
-                    xytext=(mean_x, mean_y + dy),
-                    arrowprops=dict(arrowstyle="<->", linestyle=":", lw=1.4),
-                    zorder=7,
-                    clip_on=False,
-                )
-                ax.annotate(
-                    rf"$1/\alpha_{{{feature_names[k]}}}$",
-                    xy=((mean_x + inv_x) / 2, mean_y + dy),
-                    xytext=(6, 6),
-                    textcoords="offset points",
-                    ha="left",
-                    va="bottom",
-                    fontsize=9,
-                    zorder=8,
-                    clip_on=False,
-                )
-
-        # mean dot + solid guides to right/up (uses final limits)
-        annotate_mean_with_guides(
-            ax,
-            mean_x,
-            mean_y,
-            s=70,
-            marker="o",
-            lw=1.6,
-            zorder=9,
-        )
-
-        ax.set_xlabel(feature_names[k])
-        ax.set_ylabel("zero_one_loss")
-
-        if return_artists:
-            artists.append({"k": k, "rollouts": sc_r, "demos": sc_d})
-
-    # turn off unused axes
-    for ax in axes_flat[K:]:
-        ax.axis("off")
-
-    # legend + title
-    for ax in axes_flat:
-        if ax.has_data():
-            ax.legend()
-            break
-    if title is None:
-        title = f"Zero-one loss vs fairness features (batch mean={getattr(rb, 'batch_zero_one_loss', float(np.nanmean(y_r))):.4f})"
-    fig.suptitle(title)
-    fig.tight_layout()
-
-    return (fig, axes, artists) if return_artists else (fig, axes)

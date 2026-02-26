@@ -181,7 +181,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             row_constraints=row_constraints,
         )
 
-        import ipdb;ipdb.set_trace()
+        #  import ipdb;ipdb.set_trace()
         gamma = torch.tensor(out["gamma_np"], device=device, dtype=torch.float32)  # [R,D]
         #  weights = torch.tensor(gamma.sum(axis=1), device=device, dtype=torch.float32)  # [R]
 
