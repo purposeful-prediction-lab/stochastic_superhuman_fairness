@@ -273,6 +273,7 @@ def sample_actions_from_policy(
         logits = policy(X).squeeze(-1)
         probs = torch.sigmoid(logits)
 
+        #  import ipdb;ipdb.set_trace()
         if decision_threshold is None:
             y_hat = torch.bernoulli(probs)
         else:

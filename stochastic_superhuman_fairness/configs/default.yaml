@@ -13,6 +13,7 @@ global:
 metrics:
   # use: ["D.DP", "D.EqOdds", "D.PRP", "D.Err"]
   use: ["D.DP", "D.EqOdds", "D.PRP", "D.Err", "L.ZeroOne"]
+  use_demos_as_gruth: False
 
 # =========================
 # Subdominance configuration
@@ -21,8 +22,8 @@ subdominance:
   # type: bayesian  # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
-  alpha: 1.0
-  beta: 0.0
+  alpha: [1.,1.,1.,1.,5.]
+  beta: 
   adaptive_beta: false
   weight_mode: simple # simple, softmax, linear
   alpha_updates: analytical

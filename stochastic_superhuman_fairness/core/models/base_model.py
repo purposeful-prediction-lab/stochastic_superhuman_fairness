@@ -61,6 +61,15 @@ class BaseModel(ABC, nn.Module):
         pass
 
     # ----------------------------------------------------------
+    def get_policy(self):
+        if hasattr(self, "policies") and self.policies is not None:
+            policy = list(self.policies)
+        else:
+            policy = [self.policy]
+        return policy
+
+    # ----------------------------------------------------------
+
     def train_one_epoch(self, demonstrator, batch_size: int =1, subdom_type: str = 'standard', **kwargs):
         """
         Selects standard vs stochastic subdominance training.
@@ -77,11 +86,12 @@ class BaseModel(ABC, nn.Module):
         return self._train_one_epoch(demonstrator, no_update = False, **tkwargs)
 
     # ----------------------------------------------------------
-    def collect_training_rollouts(self, demonstrator, demos=None, decision_threshold: float=0.5, stochastic = True):
+    def collect_training_rollouts(self, demonstrator, demos=None, decision_threshold: float=0.5, stochastic = True,
+                                  use_demos_as_gtruth: bool = False):
         if demos is None:
             demos = demonstrator.train_demos
         return collect_rollouts(
-            policy=self.policy,
+            policy=self.get_policy(),
             demonstrator=demonstrator,
             demos=demos,
             metrics_list=self.metrics_list,
@@ -90,14 +100,17 @@ class BaseModel(ABC, nn.Module):
             stochatic = stochastic,
             require_grad = True,
             detach_outputs = False,
+            use_demos_as_gtruth = use_demos_as_gtruth,
         )
     @torch.no_grad()
-    def collect_rollouts(self, demonstrator, demos=None, decision_threshold: float=0.5, stochastic = True):
+    def collect_rollouts(self, demonstrator, demos=None, decision_threshold: float=0.5, stochastic = True,
+                        use_demos_as_gtruth: bool = False
+                         ):
         detach_outputs = require_grad
         if demos is None:
             demos = demonstrator.train_demos
         return collect_rollouts(
-            policy=self.policy,
+            policy=self.get_policy(),
             demonstrator=demonstrator,
             demos=demos,
             metrics_list=self.metrics_list,
@@ -106,14 +119,16 @@ class BaseModel(ABC, nn.Module):
             stochatic = stochastic,
             require_grad = False,
             detach_outputs = True,
+            use_demos_as_gtruth = use_demos_as_gtruth,
         )
     @torch.no_grad()
     def collect_eval_rollouts(self, demonstrator, demos=None, decision_threshold=0.5, n_rollouts: int = 10,
-                              stochastic : bool = False):
+                            use_demos_as_gtruth: bool = False,
+                            stochastic : bool = False):
         if demos is None:
             demos = demonstrator.test_demos
         return collect_rollouts(
-            policy=self.policy,
+            policy=self.get_policy(),
             demonstrator=demonstrator,
             demos=demos,
             metrics_list=self.metrics_list,
@@ -123,12 +138,13 @@ class BaseModel(ABC, nn.Module):
             detach_outputs=True,
             stochastic = stochastic,
             sample_actions_fn=self.sample_actions, # <-- Use models sample fn
+            use_demos_as_gtruth = use_demos_as_gtruth,
         )
     # ----------------------------------------------------------
     def get_state_dict(self):
         """Return dict of policy/value weights for cross-phase transfer."""
         return {
-            "policy": self.policy.state_dict() if self.policy is not None else None,
+            "policy": self.policy.state_dict() if self.get_policy() is not None else None,
             "value": self.value.state_dict() if self.value is not None else None,
         }
 
@@ -271,60 +287,148 @@ class BaseModel(ABC, nn.Module):
        return sample_actions_from_policy(self.policy, X, decision_threshold = decision_threshold,
                              return_logits=return_logits, return_probs=return_probs,require_grad=require_grad)
 
-    def evaluate(self, demonstrator, y_domain="01", decision_threshold: float = 0.5):
-            """
-            Vectorized evaluation over all evaluation demos.
-            Returns metrics prefixed with 'eval/' for consistency.
-            """
-            demonstrator.to_torch(self.device)
+    def evaluate(self, demonstrator, decision_threshold: float = 0.5):
+        """
+        Evaluate either a single policy (self.policy) or multiple policies (self.policies).
+        Returns aggregate metrics + per-policy metrics under key "per_policy".
+        """
+        demonstrator.to_torch(self.device)
 
-            #  import ipdb;ipdb.set_trace()
-            if not demonstrator.eval_demos:
-                return {
-                    "eval/zero_one_loss": None,
-                    "eval/mean_subdom": None,
-                    "eval/std_subdom": None,
-                    "eval/fairness": None,
-                }
-
-            # ---- Precompute reference demo fairness ----
-            f_train = torch.as_tensor(
-                np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
-                dtype=torch.float32, device=self.device
-            )
-
-            # ---- Concatenate all eval demos ----
-            Xe = torch.cat([d["X"] for d in demonstrator.eval_demos], dim=0)
-            ye = torch.cat([d["y"] for d in demonstrator.eval_demos], dim=0)
-            Ae = torch.cat([d["A"] for d in demonstrator.eval_demos], dim=0)
-
-            with torch.no_grad():
-                logits = self.policy(Xe).squeeze(-1)
-                y_hat = torch.sigmoid(logits)
-                ye = ye.view_as(y_hat)
-                pred_loss = zero_one_loss(ye, y_hat, decision_threshold = decision_threshold)
-
-                # Compute fairness features for eval data
-                f_eval = compute_fairness_features(ye, y_hat, Ae, metrics=self.metrics_list)
-
-                # Subdominance relative to training demos
-                subdom_out = subdominance_loss_from_features(
-                    rollout_feats=f_eval[None, :],
-                    demo_feats=f_train,
-                    mode=self.subdom_mode,
-                    agg=self.subdom_agg,
-                    alpha=self.alpha,
-                    beta=self.beta,
-                    reduction="none",
-                )
-                S = subdom_out["S"].squeeze(0)
-                mean_subdom = float(S.mean().item())
-                std_subdom = float(S.std().item())
-
-            zero_one_val = pred_loss if pred_loss is not None else np.nan
+        if not demonstrator.eval_demos:
             return {
-                "eval/zero_one_loss": zero_one_val,
-                "eval/mean_subdom": float(mean_subdom) if mean_subdom is not None else np.nan,
-                "eval/std_subdom": float(std_subdom) if std_subdom is not None else np.nan,
-                "eval/fairness": f_eval.detach().cpu().numpy().tolist() if f_eval is not None else [],
+                "eval/zero_one_loss": None,
+                "eval/mean_subdom": None,
+                "eval/std_subdom": None,
+                "eval/fairness": None,
+                "per_policy": [],
             }
+
+        # ---- Precompute reference demo fairness (train demos) ----
+        f_train = torch.as_tensor(
+            np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+        # ---- Concatenate all eval demos ----
+        Xe = torch.cat([d["X"] for d in demonstrator.eval_demos], dim=0)
+        ye = torch.cat([d["y"] for d in demonstrator.eval_demos], dim=0)
+        Ae = torch.cat([d["A"] for d in demonstrator.eval_demos], dim=0)
+
+        # ---- collect policies uniformly ----
+        policies = self.get_policy()
+
+        with torch.no_grad():
+            # logits: (P, N)
+            logits = torch.stack([p(Xe).squeeze(-1) for p in policies], dim=0)
+            probs = torch.sigmoid(logits)                      # (P, N)
+            ye_b = ye.view(1, -1).expand_as(probs)             # (P, N)
+            Ae_b = Ae.view(-1).squeeze(-1)                     # (N,)
+
+            # zero-one per policy (thresholded)
+            y_pred = (probs >= decision_threshold).float()
+            z1 = (y_pred != ye_b).float().mean(dim=1)          # (P,)
+
+            # fairness per policy (loop over P; metrics need y_true,y_pred,a)
+            f_list = []
+            for i in range(probs.shape[0]):
+                f_list.append(compute_fairness_features(ye_b[i], probs[i], Ae_b, metrics=self.metrics_list))
+            f_eval = torch.stack(f_list, dim=0)                # (P, Kfeat)
+
+            # subdominance per policy vs train demos
+            subdom_out = subdominance_loss_from_features(
+                rollout_feats=f_eval,
+                demo_feats=f_train,
+                mode=self.subdom_mode,
+                agg=self.subdom_agg,
+                alpha=self.alpha,
+                beta=self.beta,
+                reduction="none",
+            )
+            S = subdom_out["S"]                                # (P, num_train_demos)
+            mean_subdom_per = S.mean(dim=1)                    # (P,)
+            std_subdom_per = S.std(dim=1)                      # (P,)
+
+            # aggregate over policies
+            mean_fair = f_eval.mean(dim=0)
+            agg_S = S.mean(dim=0)
+            agg_mean_subdom = float(agg_S.mean().item())
+            agg_std_subdom = float(agg_S.std().item())
+            agg_zero_one = float(z1.mean().item())
+
+        per_policy = []
+        for i in range(len(policies)):
+            per_policy.append({
+                "eval/zero_one_loss": float(z1[i].item()),
+                "eval/mean_subdom": float(mean_subdom_per[i].item()),
+                "eval/std_subdom": float(std_subdom_per[i].item()),
+                "eval/fairness": f_eval[i].detach().cpu().numpy().tolist(),
+            })
+
+        return {
+            "eval/zero_one_loss": agg_zero_one,
+            "eval/mean_subdom": agg_mean_subdom,
+            "eval/std_subdom": agg_std_subdom,
+            "eval/fairness": mean_fair.detach().cpu().numpy().tolist(),
+            "per_policy": per_policy,
+        }
+    # --------------------------------------------------------------------------------------------
+    #  def evaluate(self, demonstrator, y_domain="01", decision_threshold: float = 0.5):
+    #          """
+    #          Vectorized evaluation over all evaluation demos.
+    #          Returns metrics prefixed with 'eval/' for consistency.
+    #          """
+    #          demonstrator.to_torch(self.device)
+    #
+    #          #  import ipdb;ipdb.set_trace()
+    #          if not demonstrator.eval_demos:
+    #              return {
+    #                  "eval/zero_one_loss": None,
+    #                  "eval/mean_subdom": None,
+    #                  "eval/std_subdom": None,
+    #                  "eval/fairness": None,
+    #              }
+    #
+    #          # ---- Precompute reference demo fairness ----
+    #          f_train = torch.as_tensor(
+    #              np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
+    #              dtype=torch.float32, device=self.device
+    #          )
+    #
+    #          # ---- Concatenate all eval demos ----
+    #          Xe = torch.cat([d["X"] for d in demonstrator.eval_demos], dim=0)
+    #          ye = torch.cat([d["y"] for d in demonstrator.eval_demos], dim=0)
+    #          Ae = torch.cat([d["A"] for d in demonstrator.eval_demos], dim=0)
+    #
+    #          with torch.no_grad():
+    #              logits = self.policy(Xe).squeeze(-1)
+    #              import ipdb;ipdb.set_trace()
+    #              y_hat = torch.sigmoid(logits)
+    #              ye = ye.view_as(y_hat)
+    #              #  import ipdb;ipdb.set_trace()
+    #              pred_loss = zero_one_loss(ye, y_hat, decision_threshold = decision_threshold)
+    #
+    #              # Compute fairness features for eval data
+    #              f_eval = compute_fairness_features(ye, y_hat, Ae, metrics=self.metrics_list)
+    #
+    #              # Subdominance relative to training demos
+    #              subdom_out = subdominance_loss_from_features(
+    #                  rollout_feats=f_eval[None, :],
+    #                  demo_feats=f_train,
+    #                  mode=self.subdom_mode,
+    #                  agg=self.subdom_agg,
+    #                  alpha=self.alpha,
+    #                  beta=self.beta,
+    #                  reduction="none",
+    #              )
+    #              S = subdom_out["S"].squeeze(0)
+    #              mean_subdom = float(S.mean().item())
+    #              std_subdom = float(S.std().item())
+    #
+    #          zero_one_val = pred_loss if pred_loss is not None else np.nan
+    #          return {
+    #              "eval/zero_one_loss": zero_one_val,
+    #              "eval/mean_subdom": float(mean_subdom) if mean_subdom is not None else np.nan,
+    #              "eval/std_subdom": float(std_subdom) if std_subdom is not None else np.nan,
+    #              "eval/fairness": f_eval.detach().cpu().numpy().tolist() if f_eval is not None else [],
+    #          }

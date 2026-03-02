@@ -8,6 +8,7 @@ from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdo
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_directional_cost
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
         subdominant_logloss_shared_X_multi_rollout,  # the [R,N] logits version
+        subdominant_logloss_shared_X_multi_rollout_old,  # the [R,N] logits version, reference
         compute_subdominance_matrix,
         )
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features
@@ -97,6 +98,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         alpha_updates: str = 'analytical',   # analytical, None
         # Grad update specific
         no_update: bool = False,
+        use_demos_as_gtruth: bool = False,
         **kwargs,
     ):
         demos = demonstrator.train_demos
@@ -114,7 +116,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             dim=0
         )  # [D,N]
 
-        # ---- choose how many rollout-models to use ----
+        # ---- choose how many rollout-modelsrollouts to use ----
         policies = self.policies
         if n_rollouts is not None:
             policies = policies[: int(n_rollouts)]
@@ -124,28 +126,30 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         # ----------------------------------------------------
         # 1) Forward each model on shared X -> logits_i -> probs -> sample yhat_i
         # ----------------------------------------------------
-        logits_list = []
+        logits_list, demo_logits_list = [], []
         yhat_list = []
         feat_list = []
-
+        #  import ipdb;ipdb.set_trace()
         for pol in policies:
             logits = pol(X).squeeze(-1)          # [N]
             probs = torch.sigmoid(logits)         # [N]
             yhat = sample_binary_from_probs(probs)  # [N] sampled decisions
 
             logits_list.append(logits)
+            #  demo_logits_list.append(logits)
             yhat_list.append(yhat)
             # fairness feats use ground truth
-            f = compute_fairness_features(y_true, yhat, A, self.metrics_list, weights = [1,1,1,1,10])  # [K]
+            f = compute_fairness_features(y_true, yhat, A, self.metrics_list, weights = [1,1,1,1,1])  # [K]
             feat_list.append(f)
 
         logits_rollouts = torch.stack(logits_list, dim=0)    # [R,N]
+        #  logits_demos    = torch.stack(demo_logits_list, dim=0)    # [R,N]
         yhat_rollouts   = torch.stack(yhat_list, dim=0)      # [R,N]
         rollout_feats   = torch.stack(feat_list, dim=0)      # [R,K]
+        #  import ipdb;ipdb.set_trace()
 
         # demo fairness matrix
         demo_feats = np.stack([d["fairness_feats"] for d in demos])  # [D,K]
-
         # ----------------------------------------------------
         # 2) Subdominance matrix S[R,D]
         # ----------------------------------------------------
@@ -156,7 +160,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             demo_feats,
             mode=self.subdom_mode,
             alpha=self.alpha if self.alpha is not None else 1.0,
-            beta=0,
+            beta=self.beta,
         )
         S = self.apply_S_temperature(S, beta=ot_temperature)
 
@@ -191,19 +195,28 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             rollout_feats.detach(),
             mode=self.subdom_mode,
             alpha=self.alpha if self.alpha is not None else 1.0,
-            beta=0,
+            beta=self.beta,
         )  # [D,R]
         S_rev_ji = S_demo_roll.T  # [R,D]
         S_rev_ji = self.apply_S_temperature(S_rev_ji, beta=ot_temperature)
 
         indicator = (torch.as_tensor(S, device=device).float() <= torch.as_tensor(S_rev_ji, device=device).float()).float()
-        indicator = (torch.as_tensor(S, device=device).float() <= torch.as_tensor(S_rev_ji, device=device).float()).float()
+        indicator_rev = (torch.as_tensor(S_rev_ji, device=device).float() <= torch.as_tensor(S, device=device).float()).float()
 
         #  import ipdb;ipdb.set_trace()
         # ----------------------------------------------------
-        # 5) Loss + GD step (uses your new loss)
+        # 5) Loss + GD step 
         # ----------------------------------------------------
-        loss_out = subdominant_logloss_shared_X_multi_rollout(
+        # THis works when X is shared.
+        #  loss_out = subdominant_logloss_shared_X_multi_rollout(
+        #              logits_rollouts=logits_rollouts,  # [R,N]
+        #              logits_demos=logits_demos,        # [R,N]
+        #              y_preds = yhat_rollouts,                  # [R,D]
+        #              y_demos = y_demo,                # [D,N],
+        #              gamma=gamma,                      # [R,D]
+        #              indicator_win=indicator,          # [R,D]
+        #          )
+        loss_out = subdominant_logloss_shared_X_multi_rollout_old(
             logits_rollouts=logits_rollouts,  # [R,N]
             yhat_rollouts=yhat_rollouts,      # [R,N]
             y_demo=y_demo,                    # [D,N]

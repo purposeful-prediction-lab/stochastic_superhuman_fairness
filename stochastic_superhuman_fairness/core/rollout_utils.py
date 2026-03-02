@@ -16,6 +16,129 @@ class RolloutBatch:
     aux_list: Optional[List[Dict[str, Any]]] = None  # optional extension
     logits: Optional[List[torch.Tensor]] = None  # optional
 
+    def feats_per_policy(self, as_numpy: bool = False):
+        """
+        Groups rollout features by policy_id.
+
+        Args:
+            as_numpy: if True, returns np.ndarray instead of torch.Tensor
+
+        Returns:
+            {
+                policy_id: (n_i, K) tensor or ndarray
+            }
+        """
+
+        if self.aux_list is None:
+            raise ValueError("aux_list required to group feats by policy.")
+
+        if self.feats.ndim != 2:
+            raise ValueError("feats must be 2D (T, K).")
+
+        T = self.feats.shape[0]
+
+        # collect policy ids aligned with rollout rows
+        policy_ids = []
+        for d in self.aux_list[:T]:  # ignore trailing summary entry
+            if not isinstance(d, dict) or "policy_id" not in d:
+                raise ValueError("Each aux entry must contain 'policy_id'.")
+            policy_ids.append(int(d["policy_id"]))
+
+        policy_ids = torch.tensor(policy_ids, device=self.feats.device)
+
+        out = {}
+        for pid in torch.unique(policy_ids):
+            mask = policy_ids == pid
+            feats_group = self.feats[mask]
+
+            if as_numpy:
+                feats_group = feats_group.detach().cpu().numpy()
+
+            out[int(pid.item())] = feats_group
+
+        return out
+
+    #------------
+
+    def feats_by_mode(self, as_numpy: bool = False)->List[Union[torch.Tensor, np.ndarray]]:
+        """
+        Returns rollout feats grouped by policy_id (mode).
+
+        Output shape conceptually:
+            [m][r_m][K]
+
+        Args:
+            as_numpy: if True return numpy arrays inside lists
+
+        Returns:
+            List[List[Tensor or ndarray]]
+        """
+
+        if self.aux_list is None:
+            raise ValueError("aux_list required to group rollouts by mode.")
+
+        if self.feats.ndim != 2:
+            raise ValueError("feats must be 2D (T, K).")
+
+        T, K = self.feats.shape
+
+        # collect policy_ids aligned with feats rows
+        policy_ids = []
+        for d in self.aux_list[:T]:   # ignore trailing summary
+            if not isinstance(d, dict) or "policy_id" not in d:
+                raise ValueError("Each aux entry must contain 'policy_id'.")
+            policy_ids.append(int(d["policy_id"]))
+
+        policy_ids = np.asarray(policy_ids, dtype=int)
+        unique_ids = sorted(np.unique(policy_ids))
+
+        result = []
+
+        for pid in unique_ids:
+            mask = policy_ids == pid
+            feats_group = self.feats[mask]
+
+            if as_numpy:
+                feats_group = feats_group.detach().cpu().numpy() if torch.is_tensor(feats_group) else np.asarray(feats_group)
+
+            # convert to list of rollouts
+            #  result.append([feats_group[i] for i in range(feats_group.shape[0])])
+            result.append(feats_group)
+
+        return result
+
+    def overall_feature_mean(self, as_numpy: bool = False):
+        """
+        Computes aggregate mean over ALL rollouts for each feature dimension.
+
+        Returns:
+            Tensor (K,) or ndarray (K,)
+        """
+
+        X = self.feats
+
+        # convert to numpy if requested later
+        if isinstance(X, (list, tuple)):
+            # list of (r_m, K)
+            if len(X) == 0:
+                raise ValueError("No rollout data.")
+            X_cat = []
+            for Xm in X:
+                Xm_np = Xm.detach().cpu().numpy() if torch.is_tensor(Xm) else np.asarray(Xm)
+                X_cat.append(Xm_np)
+            X_all = np.concatenate(X_cat, axis=0)
+            mean = X_all.mean(axis=0)
+            return mean if as_numpy else torch.as_tensor(mean, device=self.feats[0].device)
+
+        # tensor or array case
+        if torch.is_tensor(X):
+            mean = X.mean(dim=0)
+            return mean.detach().cpu().numpy() if as_numpy else mean
+
+        # numpy
+        X_np = np.asarray(X)
+        mean = X_np.mean(axis=0)
+        return mean
 # ========================================================================================================================
 # Collection Functions
 # ========================================================================================================================
@@ -52,18 +175,9 @@ def collect_rollouts(
     detach_outputs: bool = True,
     stochastic: bool = True,
     return_logits: bool = False,
-    sample_actions_fn=None,   # <--- kwarg; if None and stochastic=True, use model.sample_actions
+    sample_actions_fn=None,   # if None and stochastic=True, use pol.sample_actions
+    use_demos_as_gtruth: bool = False,
 ):
-    """
-    - If stochastic=True:
-        - if sample_actions_fn is not None: use it. it must have the same signature as the base model's.
-        - else: use pol.sample_actions(probs, threshold=decision_threshold)
-    - If stochastic=False:
-        y_hat = (probs > decision_threshold).float()
-
-    Supports single policy or ensemble (cycled). Appends policy_perf to aux_list[-1].
-    """
-
     policies = _normalize_policies(policy)
     m = len(policies)
     device = next(policies[0].parameters()).device
@@ -72,9 +186,7 @@ def collect_rollouts(
     N = int(n_rollouts) if n_rollouts is not None else len(d_idxs)
 
     if m > 1 and (N % m != 0):
-        warnings.warn(
-            f"collect_rollouts: n_rollouts={N} not divisible by #policies={m}. Policies will be cycled."
-        )
+        warnings.warn(f"collect_rollouts: n_rollouts={N} not divisible by #policies={m}. Policies will be cycled.")
 
     if N != len(d_idxs):
         reps = int(np.ceil(N / len(d_idxs)))
@@ -104,24 +216,39 @@ def collect_rollouts(
 
             Xd = d["X"].to(device)
             yt = d["y"].to(device).view(-1)  # ground truth
-            yd = yt if "y_demo" not in d else d["y_demo"].to(device).view(-1)  # demo labeling if present
+            if use_demos_as_gtruth:
+                y_ref = d["y_demo"].to(device).view(-1)
+            else:
+                y_ref = yt
 
             Ad = d["A"]
             Ad = Ad.to(device) if torch.is_tensor(Ad) else Ad
 
             # --- decisions ---
-            #  import ipdb;ipdb.set_trace()
-            if not stochastic:
-                if decision_threshold is None:
-                        raise ValueError("decision_threshold must be set for deterministic collection.")
-            decision_threshold = decision_threshold if not stochastic else None
+            if not stochastic and decision_threshold is None:
+                raise ValueError("decision_threshold must be set for deterministic collection.")
 
-            y_hat, logits, probs = sample_actions_from_policy(pol, Xd, decision_threshold = decision_threshold, return_logits = True, return_probs = True, require_grad = require_grad)
+            # use provided sampler if given, else default
+            #  if sample_actions_fn is not None:
+            #      y_hat, logits, probs = sample_actions_fn(
+            #          pol, Xd,
+            #          decision_threshold=(None if stochastic else decision_threshold),
+            #          return_logits=True, return_probs=True,
+            #          require_grad=require_grad,
+            #      )
+            #  else:
+            # your existing helper; respects stochastic/deterministic via threshold
+            y_hat, logits, probs = sample_actions_from_policy(
+                pol, Xd,
+                decision_threshold=(None if stochastic else decision_threshold),
+                return_logits=True, return_probs=True,
+                require_grad=require_grad,
+            )
 
-            # fairness features (usually non-diff; ok)
-            f_r = compute_fairness_features(yd, y_hat, Ad, metrics_list)
+            # fairness features
+            f_r = compute_fairness_features(y_ref, y_hat, Ad, metrics_list)
 
-            # zero-one vs ground truth (logging only)
+            # zero-one vs ground truth (logging)
             mism = (y_hat.view(-1) != yt).float().sum().item()
             n_el = float(yt.numel())
             pol_err[pol_id] += mism
@@ -161,112 +288,141 @@ def collect_rollouts(
         aux_list=aux_list,
         logits=logits_list,
     )
-
-#------------------------------------------------------------------------------------------------
-
+# -----------------------------------------------------------------------------------
 def collect_rollouts_old(
     *,
     policy,
     demonstrator,
     demos,
     metrics_list,
-    sample_actions_fn,                 # (probs, threshold) -> y_hat
-    n_rollouts:int = None,
-    decision_threshold: Optional[float] = None,
-    demo_idxs: Union[List, np.ndarray] = None,
-    before_demo: Optional[Callable[[int, Dict[str, Any]], Dict[str, Any]]] = None,
+    n_rollouts: int = None,
+    decision_threshold: float | None = 0.5,
+    demo_idxs=None,
+    before_demo=None,
     require_grad: bool = False,
     detach_outputs: bool = True,
+    stochastic: bool = True,
     return_logits: bool = False,
+    sample_actions_fn=None,   # <--- kwarg; if None and stochastic=True, use model.sample_actions
+    use_demos_as_gtruth: bool = False,
 ):
     """
-    Collect rollouts for a fixed policy over a set of demos.
+    - If stochastic=True:
+        - if sample_actions_fn is not None: use it. it must have the same signature as the base model's.
+        - else: use pol.sample_actions(probs, threshold=decision_threshold)
+    - If stochastic=False:
+        y_hat = (probs > decision_threshold).float()
 
-    For each demo:
-      - runs the policy forward to obtain probabilities
-      - samples decisions from those probabilities
-      - computes fairness features
-
-    This function is distribution-agnostic. It supports optional
-    extension via the `before_demo` hook, which can mutate the policy
-    (e.g. by loading sampled parameters) and return auxiliary data
-    stored per rollout.
-
-    Args:
-        policy: Torch module used for forward passes.
-        demonstrator: Provides targets and sensitive attributes.
-        demos: Iterable of demo dicts with keys {"X", "A", ...}.
-        metrics_list: Fairness metrics to compute per rollout.
-        sample_actions_fn: Function mapping probabilities to actions.
-        decision_threshold: Optional threshold for deterministic decisions.
-        demo_idxs: Optional demo idxs to get Xs from and pass through policy.
-        before_demo: Optional callback executed before each rollout.
-                     Should return auxiliary info (or None).
-        require_grad: Whether grad computation is enabled or not (i.e for eval or inference)
-
-    Returns:
-        RolloutBatch with:
-          - probs: list of probability tensors per demo
-          - y_hat: list of sampled decision tensors per demo
-          - feats: stacked fairness features [R, K]
-          - aux_list: None if before_demo is None, else list of aux dicts
+    Supports single policy or ensemble (cycled). Appends policy_perf to aux_list[-1].
+    g_truth_labels_zero_one
+        - if True use ground truth labels for zero one loss
     """
+
+    policies = _normalize_policies(policy)
+    m = len(policies)
+    device = next(policies[0].parameters()).device
+
+    d_idxs = np.arange(len(demos)) if demo_idxs is None else np.asarray(demo_idxs, dtype=int).reshape(-1)
+    N = int(n_rollouts) if n_rollouts is not None else len(d_idxs)
+
+    if m > 1 and (N % m != 0):
+        warnings.warn(
+            f"collect_rollouts: n_rollouts={N} not divisible by #policies={m}. Policies will be cycled."
+        )
+
+    if N != len(d_idxs):
+        reps = int(np.ceil(N / len(d_idxs)))
+        d_idxs = np.tile(d_idxs, reps)[:N]
+
     ctx = torch.enable_grad() if require_grad else torch.no_grad()
-    device = next(policy.parameters()).device
 
     probs_list, yhat_list, feats_list = [], [], []
-    aux_list = [] if before_demo is not None else None
     logits_list = [] if return_logits else None
-    zero_one_list = []
-    total_zero_one, total_count = 0., 0.
-    d_idxs = np.arange(len(demos))if demo_idxs is None else demo_idxs 
-    n_rollouts = int(n_rollouts) if n_rollouts is not None else len(demos)
-    
+    aux_list = []
+    zero_one_losses = []
+
+    pol_err = np.zeros(m, dtype=float)
+    pol_count = np.zeros(m, dtype=float)
+    total_err, total_count = 0.0, 0.0
+
+    import ipdb;ipdb.set_trace()
     with ctx:
-        for i in d_idxs:
-        #  for i, d in enumerate(demos):
-            d = demos[i]
-            if before_demo is not None:
-                aux_list.append(before_demo(i, d))
+        for t, demo_i in enumerate(d_idxs):
+            pol_id = t % m
+            pol = policies[pol_id]
+            d = demos[int(demo_i)]
+
+            aux = (before_demo(int(demo_i), d) or {}) if before_demo is not None else {}
+            aux["policy_id"] = int(pol_id)
+            aux["demo_idx"] = int(demo_i)
+            aux_list.append(aux)
 
             Xd = d["X"].to(device)
-            #  yd = demonstrator.get_targets(d).to(device)
-            yt = d['y'].to(device) # ground truth data
-            yd = yt if 'y_demo' not in d.keys() else d['y_demo'].to(device)
+            yt = d["y"].to(device).view(-1)  # ground truth
+            if use_demos_as_gtruth:
+                y_ref =  d["y_demo"].to(device).view(-1)  # demo labeling if present
+            else:
+                y_ref =  yt  # demo labeling if present
+
             Ad = d["A"]
             Ad = Ad.to(device) if torch.is_tensor(Ad) else Ad
 
-            logits = policy(Xd).squeeze(-1)
-            probs = torch.sigmoid(logits)
+            # --- decisions ---
+            if not stochastic:
+                if decision_threshold is None:
+                        raise ValueError("decision_threshold must be set for deterministic collection.")
+            decision_threshold = decision_threshold if not stochastic else None
 
-            y_hat = sample_actions_fn(probs, threshold=decision_threshold)
-            f_r = compute_fairness_features(yd, y_hat, Ad, metrics_list)
-            import ipdb;ipdb.set_trace()
-            # ---- ZERO-ONE LOSS ----
-            pred_loss = zero_one_loss(yt, y_hat)
-            zero_one = (y_hat != yt).float().sum()
+            y_hat, logits, probs = sample_actions_from_policy(pol, Xd, decision_threshold = decision_threshold, return_logits = True, return_probs = True, require_grad = require_grad)
+
             #  import ipdb;ipdb.set_trace()
-            total_zero_one += zero_one.item()
-            total_count += yt.numel()
+            # fairness features (usually non-diff; ok)
+            f_r = compute_fairness_features(y_ref, y_hat, Ad, metrics_list)
+
+            # zero-one vs ground truth (logging only)
+            mism = (y_hat.view(-1) != y_ref).float().sum().item()
+            n_el = float(yt.numel())
+            pol_err[pol_id] += mism
+            pol_count[pol_id] += n_el
+            total_err += mism
+            total_count += n_el
+            g_truth_zero_one = mism / max(1.0, n_el)
+            zero_one_losses.append(g_truth_zero_one)
+
 
             if detach_outputs:
                 probs = probs.detach()
                 y_hat = y_hat.detach()
                 f_r = f_r.detach()
-                zone_d = zero_one.detach()
+                if return_logits:
+                    logits = logits.detach()
 
             probs_list.append(probs)
             yhat_list.append(y_hat)
             feats_list.append(f_r)
-            zero_one_list.append(zone_d / yt.numel())
-
             if return_logits:
                 logits_list.append(logits)
 
-    batch_zero_one = total_zero_one / max(1, total_count) # zero one loss for the entire batch
+    batch_zero_one = total_err / max(1.0, total_count)
     feats = torch.stack(feats_list, dim=0)
-    return RolloutBatch(probs=probs_list, y_hat=yhat_list, feats=feats, aux_list=aux_list, zero_one_losses = zero_one_list, batch_zero_one_loss = batch_zero_one)
 
+    policy_perf = {f"policy_{i}/zero_one": float(pol_err[i] / max(1.0, pol_count[i])) for i in range(m)}
+    policy_perf["batch/zero_one"] = float(batch_zero_one)
+    policy_perf["n_rollouts"] = int(N)
+    policy_perf["n_policies"] = int(m)
+    aux_list.append({"policy_perf": policy_perf})
+
+    return RolloutBatch(
+        probs=probs_list,
+        y_hat=yhat_list,
+        feats=feats,
+        zero_one_losses=zero_one_losses,
+        batch_zero_one_loss=float(batch_zero_one),
+        aux_list=aux_list,
+        logits=logits_list,
+    )
+
+#------------------------------------------------------------------------------------------------
 @torch.no_grad()
 def collect_bayesian_rollouts(
     self,

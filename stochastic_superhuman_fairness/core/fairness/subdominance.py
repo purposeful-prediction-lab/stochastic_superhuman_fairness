@@ -25,6 +25,73 @@ class SubdomLossOut:
 # Losses =========================================================================================================
 # ================================================================================================================
 def subdominant_logloss_shared_X_multi_rollout(
+    logits_rollouts: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
+    logits_demos: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
+    y_preds,
+    y_demos,
+    gamma: torch.Tensor,              # [R,D]
+    indicator_win: torch.Tensor,      # [R,D] 1 if S_ij <= Srev_ji else 0
+    eps: float = 1e-12,
+    normalize_gamma: bool = False,
+) -> SubdomLossOut:
+    """
+    Implements:
+
+      L = sum_i (sum_j gamma_ij * Iwin_ij) * BCE(logits_i, yhat_i)
+        + sum_{i,j} gamma_ij * (1-Iwin_ij) * BCE(logits_i, y_demo_j)
+
+    Shared X across all i and j.
+    """
+    device = logits_rollouts.device
+    logits_rollouts = logits_rollouts.to(device).float()  # [R,N]
+    logits_demos = logits_demos.to(device).float()  # [R,N]
+    I = indicator_win.to(device).float()                  # [R,D]
+
+    logits_demos_exp = logits_demos.unsqueeze(1)      # (R, 1, N)
+    y_demos_exp = y_demos.unsqueeze(0).float()   # (1, D, N)
+
+    log_probs_demos = -F.binary_cross_entropy_with_logits(
+        logits_demos_exp,
+        y__demos_exp,
+        reduction="none",
+    )
+    if normalize_gamma:
+        gamma = gamma / (gamma.sum() + eps)
+
+    R, N = logits_rollouts.shape
+    D = logits_demos.shape[0]
+    # --- term 1: rollout wins -> fit yhat_i under logits_i ---
+    # per-rollout BCE: [R]
+    #  log_probs = F.log_softmax(logits, dim=0)
+    w_win_i = (gamma * I).sum(dim=1)  # [R]
+    term1 = (w_win_i * bce_roll).sum()
+
+    # --- term 2: rollout loses to demo -> fit y_demo_j under logits_i ---
+    # Expand:
+    #   logits: [R,1,N]
+    #   y_demo: [1,D,N]
+    logits_ = logits_rollouts[:, None, :]   # [R,1,N]
+    ydemo_  = y_demo[None, :, :]            # [1,D,N]
+
+    w_lose_ij = gamma * (1.0 - I)           # [R,D]
+    term2 = (w_lose_ij ).sum()
+
+    loss = term1 + term2
+
+    info = {
+        "w_win_sum": float(w_win_i.sum().detach().cpu()),
+        "w_lose_sum": float(w_lose_ij.sum().detach().cpu()),
+        "indicator_mean": float(I.mean().detach().cpu()),
+        "term1": float(term1.detach().cpu()),
+        "term2": float(term2.detach().cpu()),
+    }
+    return SubdomLossOut(loss=loss, info=info)
+
+
+
+# -------------------------------------------------------------------
+
+def subdominant_logloss_shared_X_multi_rollout_old(
     *,
     logits_rollouts: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
     yhat_rollouts: torch.Tensor,      # [R,N] pseudo labels for each rollout i
@@ -82,6 +149,7 @@ def subdominant_logloss_shared_X_multi_rollout(
     term2 = (w_lose_ij * bce_pair).sum()
 
     loss = term1 + term2
+    #  import ipdb;ipdb.set_trace()
 
     info = {
         "w_win_sum": float(w_win_i.sum().detach().cpu()),
@@ -231,7 +299,7 @@ def compute_subdominance_matrix(
 
     Accepts:
       - alpha: scalar, (K,), or (R,K) where alpha[r,:] applies to rollout r
-      - beta : scalar, (K,), or (R,K) similarly (if you want per-rollout offsets)
+      - beta : scalar, (K,), or (R,K) similarly (if you want per-rollout offsets), if None it equals 0.
 
     absolute:  S = ReLU( alpha * (f_r - f_d) + beta ) summed over K
     relative:  S = ReLU( alpha * ((f_r / f_d) - 1) + beta ) summed over K
@@ -241,7 +309,7 @@ def compute_subdominance_matrix(
     like = rollout_feats
     rf = _to_backend(rollout_feats, like)   # [R,K]
     df = _to_backend(demo_feats, like)      # [D,K]
-
+    beta = 0 if beta is None else beta
     R, K = rf.shape
     D, Kd = df.shape
     if Kd != K:
@@ -282,7 +350,6 @@ def compute_subdominance_matrix(
 
     alpha3 = _broadcast_param(alpha, "alpha")  # (1,1,K) or (R,1,K)
     beta3  = _broadcast_param(beta,  "beta")   # (1,1,K) or (R,1,K)
-
     # Expand features for pairwise ops -> [R, D, K]
     rf3 = rf[:, None, :]   # [R,1,K]
     df3 = df[None, :, :]   # [1,D,K]

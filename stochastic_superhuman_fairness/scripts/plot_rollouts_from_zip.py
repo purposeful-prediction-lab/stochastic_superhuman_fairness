@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
 from stochastic_superhuman_fairness.core.models.model_io_utils import load_model_from_archive
-from stochastic_superhuman_fairness.core.plotting.rollout_plots import plot_rollouts_vs_demos, plot_zero_one_vs_features_subplots
+from stochastic_superhuman_fairness.core.plotting.rollout_plots import  plot_zero_one_vs_features_subplots, plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features
 from stochastic_superhuman_fairness.core.plotting.aux_plots import plot_subdominance_heatmap, plot_optimal_transport_solution, plot_ot_solution_heatmaps
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
     compute_subdominance_matrix,
@@ -56,11 +56,13 @@ def main():
     ap.add_argument("--pairs", default=None,
                     help='Optional pairs like "0,1;0,3;2,4"')
     ap.add_argument("--stochastic", action="store_true", help="Enable stochastic label sampling for visualization.")
+    ap.add_argument("--use_demos_as_gtruth", action="store_true", help="Use Demo labels for metric compuation instead of ground truth.")
     ap.add_argument("--save_plot_dir", default=None,
                     help="If set, save plot here; otherwise saves next to archive.")
     ap.add_argument("--feat_vs_feats_name", default="all_features_vs_features.png")
     ap.add_argument("--zero_one_vs_feats_name", default="zero_one_vs_features.png")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--r_opacity", type=float, default=.35)
     args = ap.parse_args()
 
     # Load
@@ -92,12 +94,18 @@ def main():
     else:
         # Deterministic fallback: use the base collector if you exposed it, else minimal inline.
         if hasattr(model, "collect_eval_rollouts"):
-            rb = model.collect_eval_rollouts(demo, demos=demos_sel, decision_threshold=args.decision_threshold,
-                                             n_rollouts = args.n_rollouts, stochastic=args.stochastic)
+            rb = model.collect_eval_rollouts(demo,
+                                             demos=demos_sel, 
+                                             decision_threshold = args.decision_threshold,
+                                             n_rollouts = args.n_rollouts,
+                                             stochastic=args.stochastic,
+                                             use_demos_as_gtruth = args.use_demos_as_gtruth,
+                                             )
             rollout_feats = rb.feats.detach().cpu().numpy()
         else:
             raise RuntimeError("Model has neither collect_bayesian_rollouts nor collect_eval_rollouts.")
 
+    #  import ipdb;ipdb.set_trace()
     # Demo feats
     demo_feats = np.stack([d["fairness_feats"] for d in demos_all])  # [D, K]
 
@@ -110,16 +118,15 @@ def main():
     #  alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
     alpha = 1.
     #  import ipdb;ipdb.set_trace()
-    fig, _axes = plot_rollouts_vs_demos(
-        rollouts=rollout_feats,
-        demos=demo_feats,
+    fig, axes = plot_rollouts_vs_demos_pairs(
+        #  rollout_feats,
+        rb.feats_by_mode(as_numpy=True),
+        demo_feats,
         feature_names=feature_names,
         pairs=pairs,
         title=title,
-        #alpha=alpha,
-        beta=None,
-        return_artists=False,
-        baseline_fairness = demo.meta['baseline_fairness_features'],
+        baselines = demo.meta['baseline_fairness_features'],
+        alpha_rollouts = args.r_opacity,
     )
 
     # Save
@@ -128,14 +135,23 @@ def main():
     out_path = os.path.join(save_dir, args.feat_vs_feats_name)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-    
-    fig, axes = plot_zero_one_vs_features_subplots(
-        rb,
-        demos_all,
+
+    fig, axes = plot_zero_one_vs_features(
+        #  rb,
+        rb.feats_by_mode(as_numpy=True),
+        demo_feats,
         feature_names=feature_names,
-        alpha=alpha,          # (K,) or (K+1,) if you want y-alpha too
-        baseline_fairness = demo.meta['baseline_fairness_features'],
+        baselines = demo.meta['baseline_fairness_features'],
+        alpha_rollouts = args.r_opacity,
     )
+
+    #  fig, axes = plot_zero_one_vs_features_subplots(
+    #      rb,
+    #      demos_all,
+    #      feature_names=feature_names,
+    #      alpha=alpha,          # (K,) or (K+1,) if you want y-alpha too
+    #      baseline_fairness = demo.meta['baseline_fairness_features'],
+    #  )
     # Save
     out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
