@@ -22,7 +22,7 @@ subdominance:
   # type: bayesian  # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
-  alpha: [1.,1.,1.,1.,5.]
+  alpha: [1.,1.,1.,1.,1.]
   beta: 
   adaptive_beta: false
   weight_mode: simple # simple, softmax, linear

@@ -126,7 +126,7 @@ def subdominant_logloss_shared_X_multi_rollout_old(
     # per-rollout BCE: [R]
     bce_roll = F.binary_cross_entropy_with_logits(
         logits_rollouts, yhat_rollouts, reduction="none"
-    ).mean(dim=1)  # [R]
+    ).sum(dim=1)  # [R]
 
     w_win_i = (gamma * I).sum(dim=1)  # [R]
     term1 = (w_win_i * bce_roll).sum()
@@ -143,7 +143,7 @@ def subdominant_logloss_shared_X_multi_rollout_old(
         logits_.expand(R, D, N),
         ydemo_.expand(R, D, N),
         reduction="none",
-    ).mean(dim=2)  # [R,D]
+    ).sum(dim=2)  # [R,D]
 
     w_lose_ij = gamma * (1.0 - I)           # [R,D]
     term2 = (w_lose_ij * bce_pair).sum()
