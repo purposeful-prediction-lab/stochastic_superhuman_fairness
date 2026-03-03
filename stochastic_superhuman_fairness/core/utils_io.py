@@ -50,3 +50,42 @@ def safe_json_load(path, as_omegaconf=False):
     if as_omegaconf:
         return OmegaConf.create(data)
     return data
+
+
+def load_metrics_jsonl(path, return_df=False):
+    """
+    Load a metrics.jsonl file.
+
+    Args:
+        path (str or Path): path to metrics.jsonl
+        return_df (bool): if True, also return pandas DataFrame
+
+    Returns:
+        logs (list[dict]) 
+        optionally: (logs, df)
+    """
+
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(f"No metrics file found at {path}")
+
+    logs = []
+
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                logs.append(json.loads(line))
+            except json.JSONDecodeError:
+                # skip corrupted/partial lines
+                continue
+
+    if return_df:
+        import pandas as pd
+        df = pd.DataFrame(logs)
+        return logs, df
+
+    return logs

@@ -32,6 +32,7 @@ class Learner:
         self.phase_idx = 0
         self.device = getattr(self.cfg, "device", 'cpu')
         self.global_step = 0
+        self.best_metrics = {}
         # schedule: list of dicts, each with 'algo', 'epochs', and model-specific params
         # Make sure each alho in the schedule is populated with default values from the default entry of config.
         # Shared keys with None values get assigned default values.
@@ -87,7 +88,6 @@ class Learner:
             # ----------------------
             # Phase training loop
             # ----------------------
-            #  import ipdb;ipdb.set_trace()
             for ep in range(epochs):
                 stats_train = self.model.train_one_epoch(self.demo, subdom_type = subdom_type, **train_cfg)
                 stats_train.update({
@@ -108,6 +108,7 @@ class Learner:
                         "stage": "eval"
                     })
                     self._log(eval_stats)
+                    self.save_best_model(eval_stats, {**self.cfg, 'phase_cfg': phase_cfg}, algo_tag = algo, metric = 'eval/zero_one_loss')
 
             # ----------------------
             # Save checkpoint per phase
@@ -117,6 +118,30 @@ class Learner:
 
         print("\n✅ Training completed.")
 
+    # ----------------------------------------------------------
+    def save_best_model(self, eval_stats: dict, cfg: dict, metric: str = 'eval/zero_one_loss', algo_tag: str = ''):
+        if self.best_metrics == {}:
+            self.update_best_metrics(eval_stats)
+        if eval_stats[metric] <= self.best_metrics[metric]['value']:
+            self.logger.save_checkpoint(self.model, f"best_{metric.replace('/', '_')}", algo_tag, cfg=cfg)
+        self.update_best_metrics(eval_stats)
+
+    def update_best_metrics(self, eval_stats):
+
+        info_keys = ['stage','algo', 'epoch']
+        for k,v in eval_stats.items():
+            if ('eval' in k) or ( 'train' in k):
+                if k not in self.best_metrics.keys():
+                    self.best_metrics[k] = {'value': 1e12, 'info': {ik:-1 for ik in info_keys}}
+
+                if (not isinstance(v, dict)) and (not isinstance(v, list)):
+                    try:
+                        self.best_metrics[k]['value'] = self.best_metrics[k]['value'] if v >= self.best_metrics[k]['value'] else v
+                    except:
+                        import ipdb;ipdb.set_trace()
+                    for key in info_keys:
+                        if key in eval_stats.keys(): 
+                            self.best_metrics[k]['info'][key] = eval_stats[key]
     # ----------------------------------------------------------
     def get_model(self):
         """Return current trained model."""
@@ -151,6 +176,7 @@ class Learner:
         return model_cls(merged_cfg, self.demo)
 
     # ----------------------------------------------------------
+
     def switch_algo(self, algo_name, phase_cfg):
         """Initialize a new model with parameter transfer."""
         algo_name = algo_name.lower()

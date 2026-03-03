@@ -3,6 +3,8 @@
 # =========================
 seed: 42
 device: cuda
+exp_name: # If none, this is the dataset name used: adult or compass
+log_dir: './runs'
 
 global:
   eval_freq: 5     # global fallback for evaluation frequency
@@ -22,11 +24,11 @@ subdominance:
   # type: bayesian  # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
-  alpha: [1.,1.,1.,1.,1.]
-  beta: 
+  alpha: [1.,1.,1.,1.,10.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
+  beta: 1. # If null defaults to 0
   adaptive_beta: false
   weight_mode: simple # simple, softmax, linear
-  alpha_updates: analytical
+  alpha_updates: analytical #analytical, static
 
 # =========================
 # Demonstrator configuration
@@ -34,11 +36,13 @@ subdominance:
 demonstrator:
   dataset: "adult" # adult or compass
   demotype: lrdecisions  # partition or lrdecisions
+  # LR (Logistic Regression) Decisions Specific
   n_models: 100 # only used with lr decisions. How many classifier are trained. One per demo.
   subset_ratio: 0.1 # subset of training data that lr classifiers are used, but provide pred to entire train set.
+  # Data Partition Specific
   demo_size: 100  # ingored with lr decisions, only used for partitions
   compute_global: true
-  normalize: True # Constraint valuesa
+  normalize: True # Constraint values
   normalize_mode: 'continuous'
   overwrite: False # True/ False. True will force regenerate the demos, even if they exist
   cache_dir: "./data"
@@ -60,8 +64,8 @@ learner:
       train_print_freq: 100
       model_cfg:
         policy:
-        n_models: 8
-        init_noise_std: 0.1
+        n_models: 20
+        init_noise_std: 0.3
       train:
         lr: 0.001
         batch_size: 100
@@ -80,7 +84,8 @@ learner:
     #       ema: 1.0
     #       max_mean_delta:
     #       var_ratio_clip: #[0.1, 10.0]
-    
+
+  # Each Phase will have the default values if non are given. When a kwarg is None above it stays None. 
   default:
     model_cfg:
     epochs: 10

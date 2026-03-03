@@ -3,6 +3,7 @@ import json
 import io
 import torch
 import numpy as np
+import time
 from datetime import datetime
 from collections.abc import Mapping
 from types import SimpleNamespace
@@ -39,18 +40,123 @@ class Logger:
     Simple experiment logger with checkpoint support.
     Logs per-epoch metrics and saves model states at each phase transition.
     """
+    
+    def __init__(self, base_dir="./runs", exp_name="experiment", seed=None):
+        self.base_dir = base_dir
+        os.makedirs(self.base_dir, exist_ok=True)
+        self.exp_name = exp_name
+        self.exp_dir = os.path.join(self.base_dir, self.exp_name)
+        os.makedirs(self.exp_dir, exist_ok=True)
 
-    def __init__(self, log_dir="./logs", exp_name="run"):
+        run_id = self._next_run_id_locked()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log_dir = os.path.join(log_dir, exp_name)
-        os.makedirs(self.log_dir, exist_ok=True)
-        self.file_path = os.path.join(self.log_dir, f"training_{timestamp}.jsonl")
-        self.ckpt_dir = os.path.join(self.log_dir, "checkpoints")
-        os.makedirs(self.ckpt_dir, exist_ok=True)
 
-        self._file = open(self.file_path, "a", buffering=1)  # line-buffered
+        run_name = f"{exp_name}_{run_id:03d}_{timestamp}"
+        if seed is not None:
+            run_name += f"_seed{seed}"
+
+        self.run_dir = os.path.join(self.exp_dir, run_name)
+        os.makedirs(self.run_dir, exist_ok=False)
+
+        self.ckpt_dir = os.path.join(self.run_dir, "checkpoints")
+        self.plot_dir = os.path.join(self.run_dir, "plots")
+        self.artifact_dir = os.path.join(self.run_dir, "artifacts")
+        os.makedirs(self.ckpt_dir, exist_ok=True)
+        os.makedirs(self.plot_dir, exist_ok=True)
+        os.makedirs(self.artifact_dir, exist_ok=True)
+
+        self.file_path = os.path.join(self.run_dir, "metrics_log.jsonl")
+        self._file = open(self.file_path, "a", buffering=1)
         self._write_header()
-        print(f"🧾 Logging to {self.file_path}")
+
+        print(f"🧾 Run #{run_id} directory created at: {self.run_dir}")
+
+    # ==================================================
+    # Header (keep yours)
+    # ==================================================
+    def _write_header(self):
+        pass
+
+    # ==================================================
+    # Counter + Lock
+    # ==================================================
+    def _counter_path(self) -> str:
+        return os.path.join(self.base_dir, "run_counter.txt")
+
+    def _lock_path(self) -> str:
+        return os.path.join(self.base_dir, "run_counter.lock")
+
+    def _acquire_lock(self, timeout_s: float = 10.0, poll_s: float = 0.05) -> int:
+        """
+        Acquire lock by atomically creating a lockfile.
+        Returns an OS file descriptor for the lockfile (must be closed).
+        """
+        lock_path = self._lock_path()
+        deadline = time.time() + timeout_s
+
+        while True:
+            try:
+                # Atomic create: succeeds for only one process
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                # Optional: write PID for debugging
+                os.write(fd, str(os.getpid()).encode("utf-8"))
+                return fd
+            except FileExistsError:
+                if time.time() >= deadline:
+                    raise TimeoutError(f"Timed out acquiring lock: {lock_path}")
+                time.sleep(poll_s)
+
+    def _release_lock(self, fd: int) -> None:
+        lock_path = self._lock_path()
+        try:
+            os.close(fd)
+        finally:
+            # Best-effort remove (if already removed, ignore)
+            try:
+                os.remove(lock_path)
+            except FileNotFoundError:
+                pass
+
+    def _next_run_id_locked(self) -> int:
+        """
+        Concurrency-safe counter update.
+        If the counter file is missing/corrupted, it restarts from 1.
+        """
+        fd = self._acquire_lock(timeout_s=30.0, poll_s=0.05)
+        try:
+            path = self._counter_path()
+            last = 0
+
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        txt = f.read().strip()
+                    last = int(txt)
+                    if last < 0:
+                        last = 0
+                except Exception:
+                    last = 0  # corrupted/empty -> reset
+
+            run_id = last + 1
+
+            # Write back
+            with open(path, "w") as f:
+                f.write(str(run_id))
+
+            return run_id
+        finally:
+            self._release_lock(fd)
+    #  def __init__(self, log_dir="./logs", exp_name="run"):
+    #      timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #      self.log_dir = os.path.join(log_dir, exp_name)
+    #      os.makedirs(self.log_dir, exist_ok=True)
+    #      self.file_path = os.path.join(self.log_dir, f"training_{timestamp}.jsonl")
+    #      self.ckpt_dir = os.path.join(self.log_dir, "checkpoints")
+    #      os.makedirs(self.ckpt_dir, exist_ok=True)
+    #
+    #      self._file = open(self.file_path, "a", buffering=1)  # line-buffered
+    #      self._write_header()
+    #      print(f"🧾 Logging to {self.file_path}")
 
     # ----------------------------------------------------------
     def _write_header(self):
@@ -69,13 +175,8 @@ class Logger:
         record = {k: make_json_safe(v) for k, v in record.items()}
         record["time"] = datetime.now().isoformat()
         self._file.write(json.dumps(record) + "\n")
-   #  def log(self, record: dict):
-        """Log one training/eval record to console + file."""
-        #  record = {k: v for k, v in record.items() if v is not None}
-        #  record["time"] = datetime.now().isoformat()
-        #  self._file.write(json.dumps(record) + "\n")
 
-        # Pretty console summary
+        """Log one training/eval record to console + file."""
         if verbose:
             if "algo" in record and "epoch" in record:
                 tag = f"[{record['algo'].upper()} | Epoch {record['epoch']}]"

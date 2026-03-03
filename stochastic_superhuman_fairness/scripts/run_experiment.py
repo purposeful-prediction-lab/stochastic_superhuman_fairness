@@ -23,8 +23,10 @@ def main(cfg: DictConfig):
     """
     print("🧩 Configuration:\n", OmegaConf.to_yaml(cfg))
 
-    exp_name = cfg.get("exp_name", "fairness_experiment")
-    logger = Logger(log_dir=cfg.get("log_dir", "./logs"), exp_name=exp_name)
+    exp_name = cfg.get("exp_name", None)
+    if exp_name is None:
+        exp_name = cfg.get("demonstrator", {}).get('dataset', 'fairness_experiment')
+    logger = Logger(base_dir=cfg.get("log_dir", "./logs"), exp_name=exp_name)
 
     print("📦 Initializing Demonstrator...")
     demo = Demonstrator(cfg)

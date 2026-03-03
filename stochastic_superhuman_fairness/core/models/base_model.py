@@ -42,8 +42,8 @@ class BaseModel(ABC, nn.Module):
         self.subdom_agg = scfg.get("rollout_aggregate", "mean")
         self.subdom_weight_mode = scfg.get("weight_mode", "softmax")  # or "linear"
         self.alpha_updates = scfg.get("alpha_updates", "analytical")
-        self.alpha = scfg.get("alpha")
-        self.beta = scfg.get("beta")
+        self.alpha = scfg.get("alpha", 1)
+        self.beta = scfg.get("beta", 0)
         # --- Get required fairness metrics ---
         self.metrics_list = self._resolve_metrics(cfg, demonstrator)
         #  import ipdb;ipdb.set_trace()
@@ -204,7 +204,10 @@ class BaseModel(ABC, nn.Module):
         ):
         """Placeholder – later: learn alpha per fairness dimension."""
         beta = self.beta if beta is None else beta
-        alpha =  compute_alpha(rollouts, demos, beta, mode = mode, alpha_max = alpha_max, reduce = reduce)
+        try:
+            alpha =  compute_alpha(rollouts, demos, beta, mode = mode, alpha_max = alpha_max, reduce = reduce)
+        except:
+            import ipdb;ipdb.set_trace()
         if update_self_alpha:
             self.alpha =  alpha
         return alpha

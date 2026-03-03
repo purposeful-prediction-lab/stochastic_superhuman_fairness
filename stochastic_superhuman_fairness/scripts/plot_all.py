@@ -6,7 +6,9 @@ import matplotlib.pyplot as plt
 
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
 from stochastic_superhuman_fairness.core.models.model_io_utils import load_model_from_archive
+from stochastic_superhuman_fairness.core.utils_io import load_metrics_jsonl
 from stochastic_superhuman_fairness.core.plotting.rollout_plots import  plot_zero_one_vs_features_subplots, plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features
+from stochastic_superhuman_fairness.core.plotting.loss_plots import  plot_loss_and_subdom
 from stochastic_superhuman_fairness.core.plotting.aux_plots import plot_subdominance_heatmap, plot_optimal_transport_solution, plot_ot_solution_heatmaps
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
     compute_subdominance_matrix,
@@ -47,20 +49,15 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--phase", type=int, default=0)
     ap.add_argument("--split", choices=["train", "eval"], default="eval")
-    ap.add_argument("--n_rollouts", type=int, default=100,
-                    help="Number of rollouts to collect (default: number of demos in split).")
-    ap.add_argument("--dist_mode", default="per_param_diag",
-                    help="Bayesian dist mode (if model supports bayesian rollouts).")
-    ap.add_argument("--decision_threshold", type=float, default=0.5,
-                    help="Decision threshold for action sampling.")
-    ap.add_argument("--pairs", default=None,
-                    help='Optional pairs like "0,1;0,3;2,4"')
+    ap.add_argument("--n_rollouts", type=int, default=100, help="Number of rollouts to collect (default: number of demos in split).")
+    ap.add_argument("--decision_threshold", type=float, default=0.5, help="Decision threshold for action sampling.")
+    ap.add_argument("--pairs", default=None, help='Optional pairs like "0,1;0,3;2,4"')
     ap.add_argument("--stochastic", action="store_true", help="Enable stochastic label sampling for visualization.")
     ap.add_argument("--use_demos_as_gtruth", action="store_true", help="Use Demo labels for metric compuation instead of ground truth.")
-    ap.add_argument("--save_plot_dir", default=None,
-                    help="If set, save plot here; otherwise saves next to archive.")
+    ap.add_argument("--save_plot_dir", default=None, help="If set, save plot here; otherwise saves next to archive.")
     ap.add_argument("--feat_vs_feats_name", default="all_features_vs_features.png")
     ap.add_argument("--zero_one_vs_feats_name", default="zero_one_vs_features.png")
+    ap.add_argument("--losses_name", default="losses.png")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--r_opacity", type=float, default=.35)
     args = ap.parse_args()
@@ -117,6 +114,9 @@ def main():
 
     #  alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
     alpha = 1.
+    #  import ipdb;ipdb.set_trace()
+    # Plot All Feature vs Feature Pairs
+    # =====================================================================================
     fig, axes = plot_rollouts_vs_demos_pairs(
         #  rollout_feats,
         rb.feats_by_mode(as_numpy=True),
@@ -134,12 +134,13 @@ def main():
     else:
         save_dir = os.path.join(os.path.dirname(os.path.abspath(args.archive)),'..',  'plots')
 
-    import ipdb;ipdb.set_trace()
     os.makedirs(save_dir, exist_ok=True)
     out_path = os.path.join(save_dir, args.feat_vs_feats_name)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+    # Plot Zero One vs All Other Features
+    # =====================================================================================
     fig, axes = plot_zero_one_vs_features(
         #  rb,
         rb.feats_by_mode(as_numpy=True),
@@ -149,19 +150,13 @@ def main():
         alpha_rollouts = args.r_opacity,
     )
 
-    #  fig, axes = plot_zero_one_vs_features_subplots(
-    #      rb,
-    #      demos_all,
-    #      feature_names=feature_names,
-    #      alpha=alpha,          # (K,) or (K+1,) if you want y-alpha too
-    #      baseline_fairness = demo.meta['baseline_fairness_features'],
-    #  )
     # Save
     out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print("Saved plot:", out_path)
-
+    # Plot Subdominance as heatmap
+    # =====================================================================================
     S = compute_subdominance_matrix(
             rollout_feats,
             demo_feats,
@@ -175,7 +170,8 @@ def main():
     out_path = os.path.join(save_dir, "Subdominance_heatmap.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-
+    # Plot Optimal Transport Coupling
+    # =====================================================================================
     out = solve_stochastic_subdom_coupling(
             S,
             solver="sinkhorn",
@@ -188,6 +184,16 @@ def main():
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+    # Plot Losses
+    # =====================================================================================
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(args.archive)), '..', 'metrics_log.jsonl')
+    logs = load_metrics_jsonl(log_dir)
+    fig = plot_loss_and_subdom(logs)
+    # Save
+    out_path = os.path.join(save_dir, "losses.png")
+    print(f'Saving losses.png to {out_path}')
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 if __name__ == "__main__":
     raise SystemExit(main())
