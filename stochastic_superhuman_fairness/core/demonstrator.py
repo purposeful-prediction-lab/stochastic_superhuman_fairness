@@ -7,8 +7,8 @@ from sklearn.preprocessing import StandardScaler
 from omegaconf import OmegaConf
 from stochastic_superhuman_fairness.core.dataset_utils import load_adult, load_compas
 from stochastic_superhuman_fairness.core.data_defaults import DEFAULT_DATA_CONFIGS
-from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC_REGISTRY, zero_one_loss
-from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features
+from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC_REGISTRY, zero_one_loss, compute_fairness_features
+from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features, compute_beat_rates
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict, sample_logistic_model
 
@@ -35,7 +35,7 @@ class Demonstrator:
         if auto_create:
             self.create_demos(to_torch = self.to_torch_flag)
             self._compute_standalone_demofeats()
-        #  import ipdb;ipdb.set_trace()
+        self.compute_demo_ranking()
 
     # --------------------------------------------------
 
@@ -46,6 +46,53 @@ class Demonstrator:
         self.eval_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.eval_demo_feats)
 
     # --------------------------------------------------
+    def compute_demo_ranking(self):
+        self._compute_intra_demo_subdominance()
+        self.beat_rates_train = compute_beat_rates(self.intra_S)
+        self.demo_ranking_train = np.argsort(-self.beat_rates_train)  # descending
+        self.beat_rates_eval = compute_beat_rates(self.intra_S_eval)
+        self.demo_ranking_eval = np.argsort(-self.beat_rates_eval)  # descending
+
+        #  import ipdb;ipdb.set_trace()
+    def sort_demos_by_ranking(self):
+        types = ['train', 'eval']
+        for t in types:
+            get = self__dict__[f'{t}_demos'].__getitem__
+            self.__dict__[f'{t}_demos_sorted'] = [get(i) for i in self.__dict__[f'demo_ranking_{t}']]
+        
+    def get_rank_sorted_demos(self):
+        if not hasattr(self, 'train_demos_sorted'):
+            self.sort_demos_by_ranking()
+        return self.train_demos_sorted, self.eval_demos_sorted
+
+    def sort_demo_feats_by_ranking(self):
+        types = ['train', 'eval']
+        for t in types:
+            get = self.__dict__[f'{t}_demo_feats'].__getitem__
+            self.__dict__[f'{t}_demo_feats_sorted'] = [get(i) for i in self.__dict__[f'demo_ranking_{t}']]
+
+    def get_rank_sorted_demo_feats(self):
+        if not hasattr(self, 'train_demo_feats_sorted'):
+            self.sort_demo_feats_by_ranking()
+        return self.train_demo_feats_sorted, self.eval_demo_feats_sorted
+
+    def _compute_intra_demo_subdominance(self):
+        if not hasattr(self, 'train_demo_feats'):
+           self._compute_standalone_demofeats()
+        self.intra_S = subdominance_loss_from_features(
+            self.train_demo_feats,  
+            self.train_demo_feats, 
+            agg='sum',
+            alpha = 1.,
+            beta = 0.
+            )['S']
+        self.intra_S_eval = subdominance_loss_from_features(
+            self.eval_demo_feats,  
+            self.eval_demo_feats, 
+            agg='sum',
+            alpha = 1.,
+            beta = 0.
+            )['S']
 
     def _resolve_defaults(self):
         dataset_name = self.cfg.demonstrator.dataset.lower()
@@ -158,7 +205,7 @@ class Demonstrator:
         sample_override = getattr(self.cfg.demonstrator, "demo_sample", None)
 
         if sample_override:
-            print(f"⚡ Loading requested demo sample: {sample_override}")
+            print(f" Loading requested demo sample: {sample_override}")
             out = self._load_sample(sample_override)
 
             if to_torch:

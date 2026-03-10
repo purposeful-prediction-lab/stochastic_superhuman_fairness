@@ -1,5 +1,8 @@
 import os
 import json
+import shutil
+import signal
+import atexit
 import io
 import torch
 import numpy as np
@@ -42,6 +45,8 @@ class Logger:
     """
     
     def __init__(self, base_dir="./runs", exp_name="experiment", seed=None):
+        self.completed = False
+        self._cleanup_registered = False
         self.base_dir = base_dir
         os.makedirs(self.base_dir, exist_ok=True)
         self.exp_name = exp_name
@@ -77,6 +82,33 @@ class Logger:
     def _write_header(self):
         pass
 
+    def mark_completed(self):
+        self.completed = True
+
+    def cleanup_run_dir(self):
+        """Delete log dir if run did not complete."""
+        if self.completed:
+            return
+        if self.run_dir and os.path.exists(self.run_dir):
+            try:
+                shutil.rmtree(self.run_dir)
+                print(f"[logger] Deleted interrupted run directory: {self.run_dir}")
+            except Exception as e:
+                print(f"[logger] Failed to delete log directory: {e}")
+
+    def register_interrupt_cleanup(self):
+        """Register cleanup for Ctrl+C and process exit."""
+        if self._cleanup_registered:
+            return
+        self._cleanup_registered = True
+
+        atexit.register(self.cleanup_run_dir)
+
+        def _handle_interrupt(signum, frame):
+            self.cleanup_run_dir()
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGINT, _handle_interrupt)
     # ==================================================
     # Counter + Lock
     # ==================================================

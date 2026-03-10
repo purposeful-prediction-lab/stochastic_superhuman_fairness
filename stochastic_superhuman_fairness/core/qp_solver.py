@@ -4,6 +4,41 @@ import mosek
 import matplotlib.pyplot as plt
 from stochastic_superhuman_fairness.core.utils import minmax_normalize
 
+#----------------------------------------------------------------------------------------
+def bj_from_beatrates_nocollapse(
+    beat_rates,
+    tau: float = 5.0,
+    uniform_mix: float = 0.1,    # lambda
+    b_min: float = 0.0,          # e.g. 1e-3 / D
+    center: str = "half",        # "none" | "mean" | "half"
+    eps: float = 1e-12,
+):
+    br = np.asarray(beat_rates, dtype=float)
+
+    if center == "mean":
+        x = br - br.mean()
+    elif center == "half":
+        x = br - 0.5
+    else:
+        x = br
+
+    w = np.exp(tau * x)
+    b = w / (w.sum() + eps)
+
+    # uniform mixing
+    if uniform_mix > 0:
+        D = len(b)
+        b = (1 - uniform_mix) * b + uniform_mix * (np.ones(D) / D)
+
+    # floor
+    if b_min > 0:
+        b = np.maximum(b, b_min)
+        b = b / (b.sum() + eps)
+
+    return b
+
+#----------------------------------------------------------------------------------------
+
 def prepare_subdom_cost(
     S: np.ndarray,
     normalize: bool = True,
@@ -137,6 +172,7 @@ gamma, dual_r, dual_c = solve_qp_superhuman_samples_demos(
 def _solve_qp_mosek_core(
     subdom_matrix: np.ndarray,
     rollout_marginals: np.ndarray | list = None,
+    demo_marginals: np.ndarray | list = None,
     lambda_reg: float | None = None,
     normalize_subdom: bool = True,
     tau: float = 1.0,
@@ -178,7 +214,11 @@ def _solve_qp_mosek_core(
         p_samples = np.asarray(rollout_marginals, dtype=float)
         p_samples /= p_samples.sum()
 
-    q_demos = np.ones(num_demos) / num_demos
+    if demo_marginals is None:
+        q_demos = np.ones(num_demos) / num_demos
+    else:
+        q_demos = np.asarray(demo_marginals, dtype=float)
+        q_demos /= q_demos.sum()
 
     # --- MOSEK setup ---
     with mosek.Env() as env, env.Task(0, 0) as task:
@@ -278,6 +318,115 @@ def _solve_qp_mosek_core(
 # 🔹 Sinkhorn entropic solver  (samples × demos)
 # ============================================================
 def _solve_sinkhorn_core(
+    subdom_matrix: np.ndarray,
+    rollout_marginals: np.ndarray | list = None,  # rows p
+    demo_marginals: np.ndarray | list = None,     # cols q  <-- NEW
+    normalize_subdom: bool = True,
+    tau: float = 1.0,
+    epsilon: float = 0.05,
+    max_iters: int = 1_000,
+    tol: float = 1e-8,
+    verbose: bool = True,
+    row_constraints: bool = True,
+    col_constraints: bool = True,
+    renormalize_gamma: bool = True,
+):
+    S = np.asarray(subdom_matrix, dtype=float)
+    num_samples, num_demos = S.shape
+
+    if normalize_subdom:
+        S = minmax_normalize(S)
+    if tau != 1.0:
+        S = S * tau
+
+    # ---- marginals ----
+    if rollout_marginals is None:
+        p = np.ones(num_samples) / num_samples
+    else:
+        p = np.asarray(rollout_marginals, dtype=float).reshape(-1)
+        if p.size != num_samples:
+            raise ValueError(f"rollout_marginals length {p.size} != num_samples {num_samples}")
+        p = p / (p.sum() + 1e-12)
+
+    if demo_marginals is None:
+        q = np.ones(num_demos) / num_demos
+    else:
+        q = np.asarray(demo_marginals, dtype=float).reshape(-1)
+        if q.size != num_demos:
+            raise ValueError(f"demo_marginals length {q.size} != num_demos {num_demos}")
+        # ensure nonnegative and normalized
+        q = np.clip(q, 0.0, None)
+        s = q.sum()
+        if s <= 0:
+            raise ValueError("demo_marginals sums to 0 after clipping; provide positive weights.")
+        q = q / (s + 1e-12)
+
+    # ---- kernel ----
+    S_shift = S - S.min()
+    K = np.exp(-S_shift / max(epsilon, 1e-12)) + 1e-300
+
+    u = np.ones(num_samples) / num_samples
+    v = np.ones(num_demos) / num_demos
+
+    if not row_constraints:
+        u[:] = 1.0
+    if not col_constraints:
+        v[:] = 1.0
+
+    def row_err(g):
+        return np.linalg.norm(g.sum(axis=1) - p, 1)
+    def col_err(g):
+        return np.linalg.norm(g.sum(axis=0) - q, 1)
+
+    for it in range(max_iters):
+        u_prev, v_prev = u.copy(), v.copy()
+
+        if row_constraints:
+            Kv = K @ v
+            Kv[Kv == 0] = 1e-300
+            u = p / Kv
+
+        if col_constraints:
+            KTu = K.T @ u
+            KTu[KTu == 0] = 1e-300
+            v = q / KTu
+
+        if (it % 50 == 0) or (it == max_iters - 1):
+            gamma = (u[:, None] * K) * v[None, :]
+            err_r = row_err(gamma) if row_constraints else 0.0
+            err_c = col_err(gamma) if col_constraints else 0.0
+            err = max(err_r, err_c)
+            if verbose:
+                print(f"[Sinkhorn] it={it:04d} | marg_err(L1) rows={err_r:.2e} cols={err_c:.2e}")
+            if err < tol:
+                break
+
+        if np.allclose(u, u_prev, atol=1e-14) and np.allclose(v, v_prev, atol=1e-14):
+            break
+
+    gamma = (u[:, None] * K) * v[None, :]
+
+    if verbose and (gamma < 0).any():
+        print("Some gamma values negative; clipping to 0 (numerical tiny values).")
+        gamma = np.clip(gamma, a_min=0.0, a_max=None)
+
+    if renormalize_gamma:
+        s = gamma.sum()
+        if s > 0:
+            gamma = gamma / s
+
+    dual_rows = np.log(u + 1e-300) if row_constraints else np.zeros(num_samples)
+    dual_cols = np.log(v + 1e-300) if col_constraints else np.zeros(num_demos)
+
+    if verbose:
+        rs, cs = gamma.sum(axis=1), gamma.sum(axis=0)
+        print(f"γ mean/std: {gamma.mean():.6f} / {gamma.std():.6f}")
+        print(f"γ row-sum std: {rs.std():.3e}, col-sum std: {cs.std():.3e}")
+
+    return gamma, dual_rows, dual_cols
+
+#--------------------------
+def _solve_sinkhorn_core_ref(
     subdom_matrix: np.ndarray,
     rollout_marginals: np.ndarray | list = None,  # rows p
     normalize_subdom: bool = True,
@@ -402,6 +551,7 @@ def _solve_sinkhorn_core(
 def solve_qp_superhuman(
     subdom_matrix: np.ndarray,
     rollout_marginals: np.ndarray | list = None,
+    demo_marginals: np.ndarray | list = None,
     solver: str = "mosek",         # "mosek" or "sinkhorn"
     lambda_reg: float | None = None,
     normalize_subdom: bool = True,
@@ -431,6 +581,7 @@ def solve_qp_superhuman(
         return _solve_sinkhorn_core(
             subdom_matrix=subdom_matrix,
             rollout_marginals=rollout_marginals,
+            demo_marginals = demo_marginals,
             normalize_subdom=normalize_subdom,
             tau=tau,
             epsilon=epsilon,
@@ -496,6 +647,7 @@ def solve_stochastic_subdom_coupling(
     S,
     solver="mosek",
     rollout_marginals=None,
+    demo_marginals=None,
     normalize_subdom=True,
     tau=1.0,
     adaptive_tau=False,
@@ -507,6 +659,7 @@ def solve_stochastic_subdom_coupling(
     epsilon=0.05,
     verbose=False,
     weight_method="primal",   # NEW
+    preprocess_S: bool = False,
 ):
     # ---- Convert input to numpy ----
     if torch.is_tensor(S):
@@ -519,38 +672,40 @@ def solve_stochastic_subdom_coupling(
         backend = "numpy"
 
     # ---- Preprocess S ----
-    solver_kwargs_for_tau = {
-        "rollout_marginals": rollout_marginals,
-        "solver": solver,
-        "lambda_reg": lambda_reg,
-        "normalize_subdom": False,
-        "tau": 1.0,
-        "epsilon": epsilon,
-        "row_constraints": row_constraints,
-        "col_constraints": col_constraints,
-        "verbose": False,
-    }
+    if preprocess_S:
+        solver_kwargs_for_tau = {
+            "rollout_marginals": rollout_marginals,
+            "solver": solver,
+            "lambda_reg": lambda_reg,
+            "normalize_subdom": False,
+            "tau": 1.0,
+            "epsilon": epsilon,
+            "row_constraints": row_constraints,
+            "col_constraints": col_constraints,
+            "verbose": False,
+        }
 
-    S_pre, final_tau = prepare_subdom_cost(
-        S_np,
-        normalize=normalize_subdom,
-        tau=tau,
-        adaptive_tau=adaptive_tau,
-        max_tau=max_tau,
-        tol_gamma_std=tol_gamma_std,
-        solver_fn=solve_qp_superhuman,
-        solver_kwargs=solver_kwargs_for_tau,
-        verbose=verbose,
-    )
+        S_pre, final_tau = prepare_subdom_cost(
+            S_np,
+            normalize=normalize_subdom,
+            tau=tau,
+            adaptive_tau=adaptive_tau,
+            max_tau=max_tau,
+            tol_gamma_std=tol_gamma_std,
+            solver_fn=solve_qp_superhuman,
+            solver_kwargs=solver_kwargs_for_tau,
+            verbose=verbose,
+        )
 
     # ---- Solve QP/OT ----
     gamma_np, dual_rows_np, dual_cols_np = solve_qp_superhuman(
         subdom_matrix=S_np,
         rollout_marginals=rollout_marginals,
+        demo_marginals = demo_marginals,
         solver=solver,
         lambda_reg=lambda_reg,
         normalize_subdom=normalize_subdom,
-        tau=1.0,
+        tau=tau,
         epsilon=epsilon,
         row_constraints=row_constraints,
         col_constraints=col_constraints,
@@ -575,8 +730,8 @@ def solve_stochastic_subdom_coupling(
 
     return {
         # original outputs
-        "S_prepared_np": S_pre,
-        "tau": final_tau,
+        #"S_prepared_np": S_pre,
+        #"tau": final_tau,
         "gamma_np": gamma_np,
         "dual_rows_np": dual_rows_np,
         "dual_cols_np": dual_cols_np,

@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from stochastic_superhuman_fairness.core.models.logistic import LogisticRegressionModel
 from stochastic_superhuman_fairness.core.models.registry import MODEL_REGISTRY
-from stochastic_superhuman_fairness.core.models.mlp import MLPModel
+from stochastic_superhuman_fairness.core.models.mlp import MultiSubdominantMLPModel
 from stochastic_superhuman_fairness.core.models.ppo import PPOModel
 from stochastic_superhuman_fairness.core.models import logistic, mlp, ppo, bayesian_logistic
 from stochastic_superhuman_fairness.core.fairness import subdominance
@@ -123,6 +123,7 @@ class Learner:
         if self.best_metrics == {}:
             self.update_best_metrics(eval_stats)
         if eval_stats[metric] <= self.best_metrics[metric]['value']:
+            #  print(f"Saving best {metric} model as {}")
             self.logger.save_checkpoint(self.model, f"best_{metric.replace('/', '_')}", algo_tag, cfg=cfg)
         self.update_best_metrics(eval_stats)
 

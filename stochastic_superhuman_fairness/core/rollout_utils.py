@@ -16,6 +16,29 @@ class RolloutBatch:
     aux_list: Optional[List[Dict[str, Any]]] = None  # optional extension
     logits: Optional[List[torch.Tensor]] = None  # optional
 
+    def get_rollout_policy_idxs(self):
+        #  if not hasattr(self, 'rollout_policy_idxs'):
+        self.rollout_policy_idxs = [r['policy_id'] for r in self.aux_list[:-1]]
+        return self.rollout_policy_idxs
+
+    def get_rollout_groupings_by_policy(self):
+        """
+        Convert group-id vector into row index groups.
+
+        Example
+        -------
+        [1,1,1,1,1,1,2,2,3,4]
+        -> [[0,1,2,3,4,5], [6,7], [8], [9]]
+        """
+        ids = self.get_rollout_policy_idxs()
+        ids = np.asarray(ids).reshape(-1)
+
+        groups = []
+        for g in np.unique(ids):
+            groups.append(np.where(ids == g)[0].tolist())
+
+        return groups
+
     def feats_per_policy(self, as_numpy: bool = False):
         """
         Groups rollout features by policy_id.
@@ -186,7 +209,7 @@ def collect_rollouts(
     N = int(n_rollouts) if n_rollouts is not None else len(d_idxs)
 
     if m > 1 and (N % m != 0):
-        warnings.warn(f"collect_rollouts: n_rollouts={N} not divisible by #policies={m}. Policies will be cycled.")
+        warnings.warn(f"collect_rollouts: n_rollouts={N} not divisible by #policies={m}. Policies will be cycled.\n")
 
     if N != len(d_idxs):
         reps = int(np.ceil(N / len(d_idxs)))

@@ -3,39 +3,21 @@ import matplotlib.pyplot as plt
 import math
 import torch
 
+from stochastic_superhuman_fairness.core.plotting.plotting_palettes import (
+        MODE_PALETTE_100_PAPERSAFE, BASELINE_PALETTE, MODE_PALETTE_100_MAXVAR,
+        )
 from stochastic_superhuman_fairness.core.plotting.plot_utils import (
     compute_feature_means,
     annotate_mean_with_guides,
     inv_alpha_for_dims,
     annotate_inverse_alpha_arrows,
+    cycle_palette_colors,
 )
 def _to_np(x):
     if torch.is_tensor(x):
         return x.detach().cpu().numpy()
     return np.asarray(x)
-baseline_palette = [
-            "#66a61e",  # green
-            'black'  ,  # black
-            "#e7298a",  # magenta
-            "#7570b3",  # muted purple
-            "#a6761d",  # brown
-            "#1b9e77",  # deep teal
-            "#666666",  # dark gray
-            "#8c6bb1",  # soft violet
-            "#2b8cbe",  # steel blue (NOT bright blue)
-        ]
-mode_palette = [
-    "#1b9e77",  # dark green
-    "#66a61e",  # green
-    "#4d9221",  # forest green
-    "#a6761d",  # brown
-    "#8c564b",  # muted brown
-    "#e7298a",  # magenta
-    "#d95f02",  # burnt orange
-    "#b2182b",  # dark red
-    "#7f0000",  # deep red
-    "#6a3d9a",  # purple (no blue tone)
-]
+
 #--------------------------------------------------------------
 
 def normalize_rollout_modes(rollout_feats):
@@ -259,6 +241,7 @@ def plot_rollouts_vs_demos_pairs(
     pairs=None,             # list[(i,j)] where subplot is y=feat[i], x=feat[j]
     baselines=None,         # {name: array(K,)} optional baseline points
     title="Rollouts vs Demos",
+    mode_colors : list = None, 
     s_rollouts=10,
     s_demos=18,
     s_means=40,
@@ -302,8 +285,7 @@ def plot_rollouts_vs_demos_pairs(
     axes = axes.ravel()
 
     # mode colors (distinct, paper-friendly-ish; avoid red/blue/orange)
-    #  mode_colors = ["#1b9e77", "#66a61e", "#7570b3", "#e7298a", "#a6761d", "#666666", "#8c6bb1", "#4d9221"]
-    mode_colors = mode_palette
+    mode_colors = cycle_palette_colors(M, mode_palette_MAXVAR) if mode_colors is None else mode_colors
     for ax, (i, j) in zip(axes, pairs):
         # rollouts cloud
         # --- rollouts by mode ---
@@ -399,6 +381,7 @@ def plot_zero_one_vs_features(
     baselines=None,                 # {name: array(K,)} optional, last entry is zero_one
     title="Zero-one vs Features",
     start_offset=None,              # e.g. -0.05
+    mode_colors: list = None,
     s_rollouts=10,
     s_demos=18,
     s_means=40,
@@ -414,6 +397,7 @@ def plot_zero_one_vs_features(
     """
 
     modes = normalize_rollout_modes(rollout_feats)     # list[(r_m,K)]
+    M = len(modes)
     K = modes[0].shape[1]
     K_feat = K - 1
     y_idx = K_feat
@@ -447,8 +431,7 @@ def plot_zero_one_vs_features(
     axes = axes.ravel()
 
     # paper-friendly, avoid red/blue/orange (use your palette; red reserved for rollout mean)
-    #  mode_colors = ["#1b9e77", "#66a61e", "#7570b3", "#e7298a", "#a6761d", "#666666", "#8c6bb1", "#4d9221"]
-    mode_colors = mode_palette
+    mode_colors = cycle_palette_colors(M, mode_palette_MAXVAR) if mode_colors is None else mode_colors
 
     for k in range(K_feat):
         ax = axes[k]
@@ -624,17 +607,7 @@ def plot_zero_one_vs_features_subplots(
 
         # baselines
         sc_b_list = []
-        baseline_palette = [
-            "#66a61e",  # green
-            'black'  ,  # black
-            "#e7298a",  # magenta
-            "#7570b3",  # muted purple
-            "#a6761d",  # brown
-            "#1b9e77",  # deep teal
-            "#666666",  # dark gray
-            "#8c6bb1",  # soft violet
-            "#2b8cbe",  # steel blue (NOT bright blue)
-        ]
+        
         c = 0
         for name, bf, bz in baselines:
             marker_char = f"${name[0].upper()}$"
@@ -647,7 +620,7 @@ def plot_zero_one_vs_features_subplots(
                 alpha=baseline_alpha,
                 label=name,
                 zorder=4,
-                color = baseline_palette[c]
+                color = BASELINE_PALETTE[c]
             )
             c += 1
             sc_b_list.append(sc_b)
@@ -756,3 +729,4 @@ def plot_zero_one_vs_features_subplots(
 
     return (fig, axes, artists) if return_artists else (fig, axes)
 # -----------------------------------------------------------------------------------------------
+

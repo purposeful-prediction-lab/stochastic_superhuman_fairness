@@ -24,8 +24,8 @@ subdominance:
   # type: bayesian  # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
-  alpha: [1.,1.,1.,1.,10.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
-  beta: 1. # If null defaults to 0
+  alpha: [1.,1.,1.,1.,1.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
+  beta: 0. # If null defaults to 0
   adaptive_beta: false
   weight_mode: simple # simple, softmax, linear
   alpha_updates: analytical #analytical, static
@@ -58,13 +58,14 @@ demonstrator:
 # =========================
 learner:
   schedule:
-    - algo: subdominantLogistic
+    - algo: subdominantLogistic #subdominantLogistic, subdominantmlp
       epochs: 2000
       eval_freq: 200
       train_print_freq: 100
       model_cfg:
-        policy:
-        n_models: 20
+        policy_sources: ['random', 'logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
+        policy_mixture: [10,1]
+        n_models: 11
         init_noise_std: 0.3
       train:
         lr: 0.001
@@ -97,7 +98,8 @@ learner:
         solver: 'sinkhorn'
         row_constraints: False
         ot_temperature: 1.0
-        normalize_s_matrix: True
+        gamma_temperature: 1.0
+        normalize_s_matrix: False
       bayesian:
         n_rollouts: 256
         dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn

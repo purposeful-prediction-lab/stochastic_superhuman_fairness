@@ -27,17 +27,22 @@ def main(cfg: DictConfig):
     if exp_name is None:
         exp_name = cfg.get("demonstrator", {}).get('dataset', 'fairness_experiment')
     logger = Logger(base_dir=cfg.get("log_dir", "./logs"), exp_name=exp_name)
+    logger.register_interrupt_cleanup()
+    try:
+        print("📦 Initializing Demonstrator...")
+        demo = Demonstrator(cfg)
 
-    print("📦 Initializing Demonstrator...")
-    demo = Demonstrator(cfg)
+        print("🧠 Building Learner...")
+        learner = Learner(cfg, demonstrator=demo, logger=logger)
 
-    print("🧠 Building Learner...")
-    learner = Learner(cfg, demonstrator=demo, logger=logger)
+        print("🚀 Starting training...")
+        learner.run()
+        logger.mark_completed()
+        logger.close()
+    except KeyboardInterrupt:
+        print(f'Interrupted. Deleting Run dir...\n')
+        raise
 
-    print("🚀 Starting training...")
-    learner.run()
-
-    logger.close()
     #  import ipdb;ipdb.set_trace()
 
 if __name__ == "__main__":

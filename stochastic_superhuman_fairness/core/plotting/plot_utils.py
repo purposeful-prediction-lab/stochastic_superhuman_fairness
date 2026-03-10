@@ -5,7 +5,8 @@ import math
 import mplcursors
 from typing import Dict, Any, Optional, Tuple
 import matplotlib.axes
-
+import matplotlib.patches as patches
+from stochastic_superhuman_fairness.core.plotting.plotting_palettes import BASIC_PALETTE, cycle_palette_colors
 
 def add_hover_tooltips(artists, *, rollout_labels=None, demo_labels=None):
     """
@@ -233,3 +234,164 @@ def add_mean_and_alpha_annotations(
             x_name=feature_names[ix],
             y_name=feature_names[iy],
         )
+
+
+def namespace_keywords_to_string(
+    cfg,
+    keywords,
+    ignore_keywords=None,
+    max_depth=None,
+):
+    """
+    Extract selected keys from a nested NamespaceDict/dict and return
+    an indented multiline string.
+
+    Args
+        cfg : NamespaceDict or dict
+        keywords : list of keys to include
+        ignore_keywords : list of keys whose subtrees should be skipped
+        max_depth : maximum recursion depth (None = unlimited)
+    """
+
+    keywords = set(keywords)
+    ignore_keywords = set(ignore_keywords or [])
+
+    def is_mapping(x):
+        return hasattr(x, "items") or isinstance(x, dict)
+
+    def get_items(x):
+        if isinstance(x, dict):
+            return x.items()
+        if hasattr(x, "items"):
+            return x.items()
+        return []
+
+    def format_value(v):
+        if isinstance(v, float):
+            return f"{v:.4g}"
+        return str(v)
+
+    def recurse(obj, indent=0):
+        if max_depth is not None and indent > max_depth:
+            return []
+
+        lines = []
+
+        for k, v in get_items(obj):
+
+            if k in ignore_keywords:
+                continue
+
+            if is_mapping(v):
+                child_lines = recurse(v, indent + 1)
+
+                if k in keywords or child_lines:
+                    lines.append("   " * indent + f"{k}:")
+                    lines.extend(child_lines)
+
+            else:
+                if k in keywords:
+                    lines.append("   " * indent + f"{k}: {format_value(v)}")
+
+        return lines
+
+    return "\n".join(recurse(cfg))
+
+
+def add_cfg_text_to_figure(
+    fig,
+    cfg,
+    keywords,
+    *,
+    ignore_keywords=None,
+    max_depth=None,
+    x=0.01,
+    y=0.5,
+    fontsize=10,
+    rotation=0,
+    va="center",
+    ha="left",
+):
+    """
+    Add selected config text to the side of a matplotlib figure.
+    """
+
+    text = namespace_keywords_to_string(
+        cfg,
+        keywords,
+        ignore_keywords=ignore_keywords,
+        max_depth=max_depth,
+    )
+
+    fig.text(
+        x,
+        y,
+        text,
+        fontsize=fontsize,
+        va=va,
+        ha=ha,
+        family="monospace",
+        rotation=rotation,
+    )
+
+    return text
+
+def _normalize_row_groups(row_groups, R):
+    """
+    row_groups: list of lists/arrays of row indices, e.g. [[1,2,3],[4,5]]
+    Returns:
+        row_to_group: length-R array, -1 for unassigned rows
+        n_groups: int
+    """
+    if row_groups is None:
+        return None, 0
+
+    row_to_group = np.full(R, -1, dtype=int)
+
+    for g, rows in enumerate(row_groups):
+        rows = np.asarray(rows, dtype=int).reshape(-1)
+        for r in rows:
+            if r < 0 or r >= R:
+                raise ValueError(f"Row index {r} out of bounds for R={R}.")
+            if row_to_group[r] != -1:
+                raise ValueError(f"Row {r} appears in more than one group.")
+            row_to_group[r] = g
+
+    return row_to_group, len(row_groups)
+
+
+def _add_row_group_colors_to_heatmap(
+    ax,
+    R,
+    row_groups = None,
+    group_colors: list = None,
+    strip_width: float = 0.18,
+):
+    """
+    Draw a colored strip to the left of the heatmap, one color per row group.
+    Assumes imshow row centers are at y = 0,1,...,R-1 and cell height = 1.
+    """
+    row_to_group, n_groups = _normalize_row_groups(row_groups, R)
+    if row_to_group is None:
+        return
+    colors = cycle_palette_colors(n_groups, BASIC_PALETTE) if group_colors is None else group_colors
+    if len(colors) < n_groups:
+        raise ValueError(f"Need at least {n_groups} group_colors, got {len(colors)}.")
+
+    # Put strip just left of the heatmap
+    x0 = -0.5 - strip_width
+
+    for r in range(R):
+        g = row_to_group[r]
+        if g == -1:
+            continue
+        rect = patches.Rectangle(
+            (x0, r - 0.5),
+            strip_width,
+            1.0,
+            facecolor=colors[g],
+            edgecolor="none",
+            clip_on=False,
+            zorder=5,
+        )
+        ax.add_patch(rect)

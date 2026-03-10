@@ -1,19 +1,23 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+from stochastic_superhuman_fairness.core.plotting.plot_utils import  _add_row_group_colors_to_heatmap
 
 def plot_subdominance_heatmap(
-    S,                                  # (R,D)
+    S,
     *,
     rollout_labels=None,
     demo_labels=None,
     title="Subdominance heatmap",
     figsize=(8, 6),
-    normalize="none",                   # "none" | "log" | "zscore" | "minmax"
-    clip_percentile=None,               # e.g. 99 for robust clipping
-    annotate=False,                     # annotate values in cells
-    fmt=".2f",                          # annotation format
+    normalize="none",
+    clip_percentile=None,
+    annotate=False,
+    fmt=".2f",
     show_colorbar=True,
+    row_groups=None,          
+    group_colors=None,        
+    group_strip_width=2.18,   
 ):
     """
     Plot subdominance matrix S[r,d] as heatmap.
@@ -70,6 +74,13 @@ def plot_subdominance_heatmap(
         ax.set_yticks(np.arange(R))
         ax.set_yticklabels([str(x) for x in rollout_labels])
 
+    _add_row_group_colors_to_heatmap(
+            ax,
+            R,
+            row_groups=row_groups,
+            group_colors=group_colors,
+            strip_width=group_strip_width,
+        )
     # ---- annotation ----
     if annotate and R * D <= 2500:  # avoid insane slowdowns
         for i in range(R):
@@ -92,12 +103,16 @@ def plot_subdominance_heatmap(
 def plot_ot_solution_heatmaps(
     sol: dict,
     *,
-    mode: str = "replicate",   # "replicate" or "sum"
+    mode: str = "replicate",
     title="Optimal transport (heatmaps)",
-    gamma_normalize="none",    # "none" | "log" | "minmax"
+    gamma_normalize="none",
     gamma_clip_percentile=None,
+    gamma_temperature: float = 1.0,
     figsize=(14, 4),
     show_colorbar=True,
+    row_groups=None,          # NEW
+    group_colors=None,        # NEW
+    group_strip_width=2.18,   # NEW
 ):
     """
     Plot OT solution using heatmaps.
@@ -118,7 +133,7 @@ def plot_ot_solution_heatmaps(
             return x.detach().cpu().numpy()
         return np.asarray(x)
 
-    G = _np(sol["gamma_np"]).astype(float)
+    G = _np(sol["gamma_np"]).astype(float) * gamma_temperature
     u = _np(sol["dual_rows_np"]).reshape(-1).astype(float)
     v = _np(sol["dual_cols_np"]).reshape(-1).astype(float)
 
@@ -151,6 +166,13 @@ def plot_ot_solution_heatmaps(
 
     # 1) gamma
     im0 = axes[0].imshow(Gp, aspect="auto")
+    _add_row_group_colors_to_heatmap(
+        axes[0],
+        R,
+        row_groups=row_groups,
+        group_colors=group_colors,
+        strip_width=group_strip_width,
+    )
     axes[0].set_title(r"$\gamma$")
     axes[0].set_xlabel("demos")
     axes[0].set_ylabel("rollouts")
@@ -161,12 +183,24 @@ def plot_ot_solution_heatmaps(
         V = np.repeat(v[None, :], R, axis=0)   # (R,D)
 
         im1 = axes[1].imshow(U, aspect="auto")
+        _add_row_group_colors_to_heatmap(
+            axes[1], R,
+            row_groups=row_groups,
+            group_colors=group_colors,
+            strip_width=group_strip_width,
+        ) 
         axes[1].set_title("dual_rows (replicated)")
         axes[1].set_xlabel("demos")
         axes[1].set_ylabel("rollouts")
         if show_colorbar: fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
         im2 = axes[2].imshow(V, aspect="auto")
+        _add_row_group_colors_to_heatmap(
+            axes[2], R,
+            row_groups=row_groups,
+            group_colors=group_colors,
+            strip_width=group_strip_width,
+        )
         axes[2].set_title("dual_cols (replicated)")
         axes[2].set_xlabel("demos")
         axes[2].set_ylabel("rollouts")
@@ -175,6 +209,12 @@ def plot_ot_solution_heatmaps(
     else:  # mode == "sum"
         UV = u[:, None] + v[None, :]           # (R,D)
         im1 = axes[1].imshow(UV, aspect="auto")
+        _add_row_group_colors_to_heatmap(
+            axes[1], R,
+            row_groups=row_groups,
+            group_colors=group_colors,
+            strip_width=group_strip_width,
+        )
         axes[1].set_title("dual potential (u + v)")
         axes[1].set_xlabel("demos")
         axes[1].set_ylabel("rollouts")
@@ -183,6 +223,12 @@ def plot_ot_solution_heatmaps(
         # keep 3 panels: show also separate sign structure via centered version
         UVc = UV - UV.mean()
         im2 = axes[2].imshow(UVc, aspect="auto")
+        _add_row_group_colors_to_heatmap(
+            axes[2], R,
+            row_groups=row_groups,
+            group_colors=group_colors,
+            strip_width=group_strip_width,
+        )
         axes[2].set_title("(u + v) centered")
         axes[2].set_xlabel("demos")
         axes[2].set_ylabel("rollouts")
@@ -317,6 +363,71 @@ def plot_optimal_transport_solution(
     fig.tight_layout()
     return fig, axes
 
+def plot_indicator_matrix(
+    M,
+    *,
+    row_labels=None,
+    col_labels=None,
+    title="Indicator Matrix",
+    figsize=(8, 6),
+    cmap="Greys",
+    show_colorbar=False,
+    annotate=False,
+    row_groups=None,
+    group_colors=None,
+    group_strip_width=0.18,
+):
+    """
+    Plot a 0/1 indicator matrix with optional row-group color strip.
+
+    row_groups example:
+        [[0,1,2,3], [4,5], [6,7,8]]
+    """
+    M = np.asarray(M)
+    if M.ndim != 2:
+        raise ValueError("M must be 2D.")
+    if not np.all(np.isin(M, [0, 1])):
+        raise ValueError("M must contain only 0s and 1s.")
+
+    R, C = M.shape
+
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(M, cmap=cmap, aspect="auto", vmin=0, vmax=1)
+
+    _add_row_group_colors_to_heatmap(
+        ax,
+        R,
+        row_groups=row_groups,
+        group_colors=group_colors,
+        strip_width=group_strip_width,
+    )
+
+    if row_labels is not None:
+        if len(row_labels) != R:
+            raise ValueError(f"row_labels must have length {R}.")
+        ax.set_yticks(np.arange(R))
+        ax.set_yticklabels(row_labels)
+
+    if col_labels is not None:
+        if len(col_labels) != C:
+            raise ValueError(f"col_labels must have length {C}.")
+        ax.set_xticks(np.arange(C))
+        ax.set_xticklabels(col_labels, rotation=45, ha="right")
+
+    if annotate:
+        for i in range(R):
+            for j in range(C):
+                ax.text(j, i, str(int(M[i, j])), ha="center", va="center", fontsize=8)
+
+    ax.set_title(title)
+    ax.set_xlabel("Columns")
+    ax.set_ylabel("Rows")
+
+    if show_colorbar:
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    fig.tight_layout()
+    return fig, ax
 
 def save_heatmap(
     matrix,

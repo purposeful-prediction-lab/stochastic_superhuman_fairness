@@ -4,15 +4,23 @@ import torch.nn.functional as F
 import numpy as np
 import copy
 from stochastic_superhuman_fairness.core.models.logistic import LogisticRegressionModel
-from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
+from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling, bj_from_beatrates_nocollapse
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_directional_cost
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
-        subdominant_logloss_shared_X_multi_rollout,  # the [R,N] logits version
-        subdominant_logloss_shared_X_multi_rollout_old,  # the [R,N] logits version, reference
+        subdominant_logloss_shared_X_multi_rollout,  # the [R,N] logits version, reference
         compute_subdominance_matrix,
         )
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features
 from stochastic_superhuman_fairness.core.utils import sample_binary_from_probs
+from stochastic_superhuman_fairness.core.baselines.logistic_regression import (
+        train_logistic_from_demos, load_saved_sklearn_policy_into_torch,  sklearn_logistic_to_torch_clone,
+        logistic_training_settings, sklearn_model_to_torch_module,
+        )
+
+from pathlib import Path
+import os
+CURRENT_FILE = Path(__file__).resolve()
+CURRENT_DIR = CURRENT_FILE.parent
 
 class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
     """
@@ -37,8 +45,30 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
 
         # --- create ensemble ---
         # Reuse the base LogisticRegressionModel policy architecture by cloning it.
+        source_policies = self._build_source_policies_from_cfg(demonstrator)
+        mixtures = self.model_cfg.get("policy_mixture", None)
+        if mixtures is None:
+            raise ValueError("model_cfg.policy_mixture must be provided.")
+
+        self.policies = self.init_policy_mixture(
+            source_policies=source_policies,
+            mixtures=mixtures,
+            n_total_policies=self.n_models,
+        )
+        #  import ipdb;ipdb.set_trace()
         # Assumes self.policy is an nn.Module created in LogisticRegressionModel.__init__.
-        self.policies = nn.ModuleList([self._clone_policy() for _ in range(self.n_models)])
+        #  log_policy = train_logistic_from_demos(demonstrator.train_demos)
+        #  import ipdb;ipdb.set_trace()
+        #  logistic_policy = load_saved_sklearn_policy_into_torch(
+        #      os.path.join(CURRENT_DIR, "../../data/checkpoints/logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl"),
+        #      device=self.device,
+        #  )
+        #  self.policies = self.init_policy_mixture([self.policy, logistic_policy], [1, 1], 2)
+        #  self.policies = self.init_policy_mixture([self.policy], [8], 8)
+        #  self.policies = self.init_policy_mixture([logistic_policy], [3], 3)
+        #  self.policies = self.init_policy_mixture([logistic_policy], [100], 100)
+        #  import ipdb;ipdb.set_trace()
+        #  self.policies = nn.ModuleList([self._clone_policy() for _ in range(self.n_models)])
 
         # optional: initialize ensemble members slightly differently
         init_noise = float(self.model_cfg.get("init_noise_std", 0.05))
@@ -52,12 +82,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         else:
             self.optimizer = torch.optim.Adam(self.policies.parameters(), lr=lr, weight_decay=wd)
         #  import ipdb;ipdb.set_trace()
-
-    def _clone_policy(self) -> nn.Module:
-        # Create a new instance with the same architecture and copy weights.
-        # This is the most robust approach if your policy isn't a simple Linear.
-        pol = copy.deepcopy(self.policy)
-        return pol
 
     def _perturb_ensemble(self, std: float):
         with torch.no_grad():
@@ -93,6 +117,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         solver: str = "mosek",
         row_constraints: bool = False,
         ot_temperature: float = 1.0,
+        gamma_temperature: float = 1.0,
         normalize_s_matrix: bool = True,
         stochastic_if_threshold: bool = False,    # (ignored here; we sample stochastically)
         alpha_updates: str = 'analytical',   # analytical, None
@@ -162,7 +187,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             alpha=self.alpha if self.alpha is not None else 1.0,
             beta=self.beta,
         )
-        S = self.apply_S_temperature(S, beta=ot_temperature)
 
         #  import ipdb;ipdb.set_trace()
         # ----------------------------------------------------
@@ -177,16 +201,19 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         # ----------------------------------------------------
         # 4) OT solve -> gamma
         # ----------------------------------------------------
+        bj_priors = bj_from_beatrates_nocollapse(demonstrator.beat_rates_train)
         out = solve_stochastic_subdom_coupling(
             S,
             solver=solver,
             weight_method="primal",
             normalize_subdom=normalize_s_matrix,
+            demo_marginals = bj_priors,
             row_constraints=row_constraints,
+            tau = ot_temperature, # Scales subdom matrix before OT computation
         )
 
         #  import ipdb;ipdb.set_trace()
-        gamma = torch.tensor(out["gamma_np"], device=device, dtype=torch.float32)  # [R,D]
+        gamma = gamma_temperature * torch.tensor(out["gamma_np"], device=device, dtype=torch.float32)  # [R,D]
         #  weights = torch.tensor(gamma.sum(axis=1), device=device, dtype=torch.float32)  # [R]
 
         # reverse subdom (demo -> rollout), aligned to [R,D]
@@ -208,15 +235,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         # 5) Loss + GD step 
         # ----------------------------------------------------
         # THis works when X is shared.
-        #  loss_out = subdominant_logloss_shared_X_multi_rollout(
-        #              logits_rollouts=logits_rollouts,  # [R,N]
-        #              logits_demos=logits_demos,        # [R,N]
-        #              y_preds = yhat_rollouts,                  # [R,D]
-        #              y_demos = y_demo,                # [D,N],
-        #              gamma=gamma,                      # [R,D]
-        #              indicator_win=indicator,          # [R,D]
-        #          )
-        loss_out = subdominant_logloss_shared_X_multi_rollout_old(
+        loss_out = subdominant_logloss_shared_X_multi_rollout(
             logits_rollouts=logits_rollouts,  # [R,N]
             yhat_rollouts=yhat_rollouts,      # [R,N]
             y_demo=y_demo,                    # [D,N]
@@ -392,3 +411,90 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             "train/R": int(R),
             "train/D": int(D),
         }
+
+    #--------------------------------------------------------------------------------------
+
+    def _policy_asset_dir(self):
+        # relative to this class file
+        return Path(__file__).resolve().parent / "../../data/checkpoints"
+
+    #--------------------------------------------------------------------------------------
+
+    def _resolve_policy_spec(self, spec, demonstrator):
+        """
+        spec can be:
+          - "random"
+          - "lr"          -> train sklearn logistic on demonstrator.train_demos, convert to torch
+          - "something.pkl" / "something.zip"
+          - full/relative path to .pkl or .zip
+
+        Returns:
+          torch nn.Module
+        """
+        if not isinstance(spec, str):
+            raise TypeError(f"Policy spec must be a string. Got {type(spec)}")
+
+        s = spec.strip().lower()
+
+        # 1) random
+        if s == "random":
+            return self._clone_policy().to(self.device)
+
+        # 2) train logistic from demos
+        if s == "lr":
+            preset = 'medium'
+            print(f"Training logistic a --{preset}-- model as part of start policy mixture...\n")
+            settings = logistic_training_settings("medium")
+            sk_model = train_logistic_from_demos(demonstrator.train_demos, **settings)
+            return sklearn_model_to_torch_module(
+                sk_model,
+                device=self.device,
+            )
+
+        # 3) file / checkpoint
+        raw_spec = Path(spec)
+
+        # if no parent/path given, look in default asset dir
+        if raw_spec.parent == Path("."):
+            candidate = (self._policy_asset_dir() / raw_spec).resolve()
+        else:
+            candidate = raw_spec.expanduser().resolve()
+
+        if not candidate.exists():
+            raise FileNotFoundError(f"Could not find policy file: {candidate}")
+
+        suffix = candidate.suffix.lower()
+
+        # sklearn logistic saved checkpoint
+        if suffix == ".pkl":
+            return load_saved_sklearn_policy_into_torch(
+                candidate,
+                device=self.device,
+            )
+
+        # torch / sb3 / custom zip loader
+        if suffix == ".zip":
+            # replace with your actual zip/bootstrap loader
+            return load_saved_bootstrap_policy_into_torch(
+                candidate,
+                base_policy=self.policy,
+                device=self.device,
+            )
+
+        raise ValueError(f"Unsupported policy spec/file type: {spec}")
+
+    #--------------------------------------------------------------------------------------
+
+    def _build_source_policies_from_cfg(self, demonstrator):
+        """
+        Example expected cfg:
+          model_cfg.policy_sources = ["random", "lr", "my_model.pkl"]
+        """
+        specs = self.model_cfg.get("policy_sources", None)
+        if specs is None:
+            raise ValueError("model_cfg.policy_sources must be provided.")
+
+        if isinstance(specs, str):
+            specs = [specs]
+
+        return [self._resolve_policy_spec(spec, demonstrator) for spec in specs]

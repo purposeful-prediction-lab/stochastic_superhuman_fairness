@@ -22,76 +22,10 @@ class SubdomLossOut:
     loss: torch.Tensor
     info: dict
 # ================================================================================================================
-# Losses =========================================================================================================
+# Losses 
 # ================================================================================================================
+
 def subdominant_logloss_shared_X_multi_rollout(
-    logits_rollouts: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
-    logits_demos: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
-    y_preds,
-    y_demos,
-    gamma: torch.Tensor,              # [R,D]
-    indicator_win: torch.Tensor,      # [R,D] 1 if S_ij <= Srev_ji else 0
-    eps: float = 1e-12,
-    normalize_gamma: bool = False,
-) -> SubdomLossOut:
-    """
-    Implements:
-
-      L = sum_i (sum_j gamma_ij * Iwin_ij) * BCE(logits_i, yhat_i)
-        + sum_{i,j} gamma_ij * (1-Iwin_ij) * BCE(logits_i, y_demo_j)
-
-    Shared X across all i and j.
-    """
-    device = logits_rollouts.device
-    logits_rollouts = logits_rollouts.to(device).float()  # [R,N]
-    logits_demos = logits_demos.to(device).float()  # [R,N]
-    I = indicator_win.to(device).float()                  # [R,D]
-
-    logits_demos_exp = logits_demos.unsqueeze(1)      # (R, 1, N)
-    y_demos_exp = y_demos.unsqueeze(0).float()   # (1, D, N)
-
-    log_probs_demos = -F.binary_cross_entropy_with_logits(
-        logits_demos_exp,
-        y__demos_exp,
-        reduction="none",
-    )
-    if normalize_gamma:
-        gamma = gamma / (gamma.sum() + eps)
-
-    R, N = logits_rollouts.shape
-    D = logits_demos.shape[0]
-    # --- term 1: rollout wins -> fit yhat_i under logits_i ---
-    # per-rollout BCE: [R]
-    #  log_probs = F.log_softmax(logits, dim=0)
-    w_win_i = (gamma * I).sum(dim=1)  # [R]
-    term1 = (w_win_i * bce_roll).sum()
-
-    # --- term 2: rollout loses to demo -> fit y_demo_j under logits_i ---
-    # Expand:
-    #   logits: [R,1,N]
-    #   y_demo: [1,D,N]
-    logits_ = logits_rollouts[:, None, :]   # [R,1,N]
-    ydemo_  = y_demo[None, :, :]            # [1,D,N]
-
-    w_lose_ij = gamma * (1.0 - I)           # [R,D]
-    term2 = (w_lose_ij ).sum()
-
-    loss = term1 + term2
-
-    info = {
-        "w_win_sum": float(w_win_i.sum().detach().cpu()),
-        "w_lose_sum": float(w_lose_ij.sum().detach().cpu()),
-        "indicator_mean": float(I.mean().detach().cpu()),
-        "term1": float(term1.detach().cpu()),
-        "term2": float(term2.detach().cpu()),
-    }
-    return SubdomLossOut(loss=loss, info=info)
-
-
-
-# -------------------------------------------------------------------
-
-def subdominant_logloss_shared_X_multi_rollout_old(
     *,
     logits_rollouts: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
     yhat_rollouts: torch.Tensor,      # [R,N] pseudo labels for each rollout i
@@ -434,6 +368,91 @@ def compute_subdominance_matrix_simple(
         return S
 
 # -------------------------------------------------------------------------------------
+def compute_subdominance_matrix_grouped(
+    rollout_feats,              # list of (r_m, K) OR [R,K]
+    demo_feats,                 # [D, K]
+    mode: str = "absolute",
+    alpha=None,
+    beta=None,
+    eps: float = 1e-12,
+    return_group_info: bool = False,
+):
+    """
+    Like compute_subdominance_matrix, but accepts rollout_feats as either:
+      - a single matrix/tensor [R, K]
+      - a list/tuple of matrices/tensors [(r_0,K), (r_1,K), ...]
+
+    If a list is given, all rollout groups are concatenated in order, so rows
+    from the same group stay contiguous in the final rollout matrix.
+
+    Returns:
+      S                  if return_group_info=False
+      (S, row_groups)    if return_group_info=True
+
+    where row_groups is e.g. [[0,1,2],[3,4],...]
+    """
+
+    # already a single matrix
+    if not isinstance(rollout_feats, (list, tuple)):
+        S = compute_subdominance_matrix(
+            rollout_feats=rollout_feats,
+            demo_feats=demo_feats,
+            mode=mode,
+            alpha=alpha,
+            beta=beta,
+            eps=eps,
+        )
+        if return_group_info:
+            R = rollout_feats.shape[0]
+            return S, [list(range(R))]
+        return S
+
+    if len(rollout_feats) == 0:
+        raise ValueError("rollout_feats list is empty.")
+
+    first = rollout_feats[0]
+    is_torch = _is_tensor(first)
+
+    # concat while preserving grouping
+    row_groups = []
+    pieces = []
+    start = 0
+    K = None
+
+    for grp in rollout_feats:
+        grp_b = _to_backend(grp, first)
+        if grp_b.ndim != 2:
+            raise ValueError("Each rollout group must be 2D with shape (r_m, K).")
+
+        r_m, k_m = grp_b.shape
+        if K is None:
+            K = k_m
+        elif k_m != K:
+            raise ValueError(f"All rollout groups must have same K. Got {K} and {k_m}.")
+
+        pieces.append(grp_b)
+        row_groups.append(list(range(start, start + r_m)))
+        start += r_m
+
+    if is_torch:
+        import torch
+        rollout_mat = torch.cat(pieces, dim=0)
+    else:
+        rollout_mat = np.concatenate(pieces, axis=0)
+
+    S = compute_subdominance_matrix(
+        rollout_feats=rollout_mat,
+        demo_feats=demo_feats,
+        mode=mode,
+        alpha=alpha,
+        beta=beta,
+        eps=eps,
+    )
+
+    if return_group_info:
+        return S, row_groups
+    return S
+# -------------------------------------------------------------------------------------
 
 def aggregate_subdominance(
     S,                          # [R, D] matrix
@@ -654,3 +673,48 @@ def compute_subdominance_loss(
         reduction=reduction,
     )
     return out["loss"]
+
+def compute_beat_rates(S, axis=1, ignore_diag=True, return_beat_matrix: bool = False):
+    """
+    Compute beat rates from a pairwise score matrix.
+
+    Assumes:
+        element i beats j if S[i,j] < S[j,i]
+
+    Args
+    ----
+    S : (N,N) array-like
+        Pairwise score matrix.
+    axis : int
+        Axis over which to compute rates.
+        axis=1 -> row element beats column element (default).
+    ignore_diag : bool
+        Whether to ignore self-comparisons.
+
+    Returns
+    -------
+    beat_rates : (N,) ndarray
+        Fraction of opponents each element beats.
+    beat_matrix : (N,N) ndarray
+        Boolean matrix where beat_matrix[i,j] = True if i beats j.
+    """
+    S = np.asarray(S)
+
+    if S.shape[0] != S.shape[1]:
+        raise ValueError("S must be square for beat-rate computation.")
+
+    # i beats j if S[i,j] < S[j,i]
+    beat_matrix = S < S.T
+
+    if ignore_diag:
+        np.fill_diagonal(beat_matrix, False)
+        denom = S.shape[0] - 1
+    else:
+        denom = S.shape[0]
+
+    beat_rates = beat_matrix.sum(axis=axis) / max(1, denom)
+    if return_beat_matrix:
+        return beat_rates, beat_matrix
+    return beat_rates
+
+

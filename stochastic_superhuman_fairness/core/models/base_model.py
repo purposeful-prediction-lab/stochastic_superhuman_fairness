@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import copy
+import math
 from abc import ABC, abstractmethod
 from stochastic_superhuman_fairness.core.rollout_utils import collect_rollouts, RolloutBatch
 from stochastic_superhuman_fairness.core.fairness.subdominance import compute_alpha
@@ -376,62 +378,124 @@ class BaseModel(ABC, nn.Module):
             "per_policy": per_policy,
         }
     # --------------------------------------------------------------------------------------------
-    #  def evaluate(self, demonstrator, y_domain="01", decision_threshold: float = 0.5):
-    #          """
-    #          Vectorized evaluation over all evaluation demos.
-    #          Returns metrics prefixed with 'eval/' for consistency.
-    #          """
-    #          demonstrator.to_torch(self.device)
-    #
-    #          #  import ipdb;ipdb.set_trace()
-    #          if not demonstrator.eval_demos:
-    #              return {
-    #                  "eval/zero_one_loss": None,
-    #                  "eval/mean_subdom": None,
-    #                  "eval/std_subdom": None,
-    #                  "eval/fairness": None,
-    #              }
-    #
-    #          # ---- Precompute reference demo fairness ----
-    #          f_train = torch.as_tensor(
-    #              np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
-    #              dtype=torch.float32, device=self.device
-    #          )
-    #
-    #          # ---- Concatenate all eval demos ----
-    #          Xe = torch.cat([d["X"] for d in demonstrator.eval_demos], dim=0)
-    #          ye = torch.cat([d["y"] for d in demonstrator.eval_demos], dim=0)
-    #          Ae = torch.cat([d["A"] for d in demonstrator.eval_demos], dim=0)
-    #
-    #          with torch.no_grad():
-    #              logits = self.policy(Xe).squeeze(-1)
-    #              import ipdb;ipdb.set_trace()
-    #              y_hat = torch.sigmoid(logits)
-    #              ye = ye.view_as(y_hat)
-    #              #  import ipdb;ipdb.set_trace()
-    #              pred_loss = zero_one_loss(ye, y_hat, decision_threshold = decision_threshold)
-    #
-    #              # Compute fairness features for eval data
-    #              f_eval = compute_fairness_features(ye, y_hat, Ae, metrics=self.metrics_list)
-    #
-    #              # Subdominance relative to training demos
-    #              subdom_out = subdominance_loss_from_features(
-    #                  rollout_feats=f_eval[None, :],
-    #                  demo_feats=f_train,
-    #                  mode=self.subdom_mode,
-    #                  agg=self.subdom_agg,
-    #                  alpha=self.alpha,
-    #                  beta=self.beta,
-    #                  reduction="none",
-    #              )
-    #              S = subdom_out["S"].squeeze(0)
-    #              mean_subdom = float(S.mean().item())
-    #              std_subdom = float(S.std().item())
-    #
-    #          zero_one_val = pred_loss if pred_loss is not None else np.nan
-    #          return {
-    #              "eval/zero_one_loss": zero_one_val,
-    #              "eval/mean_subdom": float(mean_subdom) if mean_subdom is not None else np.nan,
-    #              "eval/std_subdom": float(std_subdom) if std_subdom is not None else np.nan,
-    #              "eval/fairness": f_eval.detach().cpu().numpy().tolist() if f_eval is not None else [],
-    #          }
+    def _clone_policy(self) -> nn.Module:
+        # Create a new instance with the same architecture and copy weights.
+        # This is the most robust approach if your policy isn't a simple Linear.
+        pol = copy.deepcopy(self.policy)
+        return pol
+
+    def init_policy_mixture(
+        self,
+        source_policies,
+        mixtures,
+        n_total_policies: int,
+    ):
+        """
+        Build a ModuleList containing a mixture of cloned source policies.
+
+        Args:
+            source_policies: list of nn.Module
+            mixtures:
+                list/array of either:
+                  - probabilities
+                  - integer occurrences
+            n_total_policies: total number of output policies
+
+        Returns:
+            nn.ModuleList
+        """
+        if mixtures is None:
+            raise ValueError("mixtures must be provided.")
+
+        if not isinstance(source_policies, (list, tuple)) or len(source_policies) == 0:
+            raise ValueError("source_policies must be a non-empty list or tuple.")
+
+        m = len(source_policies)
+        if n_total_policies <= 0:
+            raise ValueError("n_total_policies must be > 0.")
+
+        mix = np.asarray(mixtures).reshape(-1)
+        if len(mix) > m:
+            raise ValueError("mixtures cannot be longer than source_policies.")
+
+        # pad if needed
+        if len(mix) < m:
+            pad_len = m - len(mix)
+
+            # counts case: fill with 1
+            if np.all(np.equal(np.mod(mix, 1), 0)):
+                mix = np.concatenate([mix, np.ones(pad_len, dtype=mix.dtype)])
+            else:
+                # probs case: fill later from leftover mass
+                mix = np.concatenate([mix, np.full(pad_len, np.nan)])
+
+        # detect counts vs probs
+        provided = ~np.isnan(mix.astype(float))
+        provided_vals = mix[provided].astype(float)
+
+        is_counts = np.all(provided_vals >= 0) and np.all(np.isclose(provided_vals, np.round(provided_vals)))
+
+        if is_counts:
+            counts = mix.astype(int)
+
+        else:
+            if np.any(provided_vals < 0):
+                raise ValueError("Probability mixtures must be non-negative.")
+
+            probs = np.zeros(m, dtype=float)
+            probs[provided] = provided_vals
+
+            p_sum = probs.sum()
+            if p_sum > 1.0 + 1e-12:
+                raise ValueError(f"Probability mixtures sum to {p_sum:.6f} > 1.")
+
+            missing = np.isnan(mix.astype(float))
+            leftover = 1.0 - p_sum
+
+            if missing.any():
+                probs[missing] = leftover / missing.sum()
+            elif leftover > 1e-12:
+                print(f"\nProbability mixture of start policies is {p_sum} <= 1.0. Dividing remaning {leftover:.4f} uniformly to source policies.\n")
+                probs += leftover / m
+
+            probs = probs / probs.sum()
+
+            raw = probs * n_total_policies
+            counts = np.floor(raw).astype(int)
+
+            remainder = n_total_policies - counts.sum()
+            if remainder > 0:
+                frac = raw - counts
+                order = np.argsort(-frac)
+                counts[order[:remainder]] += 1
+
+        # adjust counts to exact total
+        total = counts.sum()
+
+        if total > n_total_policies:
+            extra = total - n_total_policies
+            order = np.argsort(-counts)
+            for idx in order:
+                take = min(extra, counts[idx])
+                counts[idx] -= take
+                extra -= take
+                if extra == 0:
+                    break
+
+        elif total < n_total_policies:
+            deficit = n_total_policies - total
+            order = np.argsort(-counts)
+            print(f'\nSum of all source policies is {total} <= {n_total_policies} required. Uniformly spreading {deficit} deficit to all source policies\n')
+            for i in range(deficit):
+                counts[order[i % m]] += 1
+
+        # build ModuleList
+        out = []
+        for pol, c in zip(source_policies, counts):
+            for _ in range(int(c)):
+                out.append(copy.deepcopy(pol))
+
+        if len(out) != n_total_policies:
+            raise RuntimeError(f"Internal error: created {len(out)} policies, expected {n_total_policies}.")
+
+        return nn.ModuleList(out)

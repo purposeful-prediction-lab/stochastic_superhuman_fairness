@@ -7,11 +7,17 @@ import matplotlib.pyplot as plt
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
 from stochastic_superhuman_fairness.core.models.model_io_utils import load_model_from_archive
 from stochastic_superhuman_fairness.core.utils_io import load_metrics_jsonl
-from stochastic_superhuman_fairness.core.plotting.rollout_plots import  plot_zero_one_vs_features_subplots, plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features
-from stochastic_superhuman_fairness.core.plotting.loss_plots import  plot_loss_and_subdom
-from stochastic_superhuman_fairness.core.plotting.aux_plots import plot_subdominance_heatmap, plot_optimal_transport_solution, plot_ot_solution_heatmaps
+from stochastic_superhuman_fairness.core.plotting.rollout_plots import plot_zero_one_vs_features_subplots, plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features
+from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_and_subdom
+from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
+from stochastic_superhuman_fairness.core.plotting.plotting_palettes import MODE_PALETTE_100_PAPERSAFE, MODE_PALETTE_100_MAXVAR
+from stochastic_superhuman_fairness.core.plotting.aux_plots import (
+        plot_subdominance_heatmap, plot_optimal_transport_solution,
+        plot_ot_solution_heatmaps, plot_indicator_matrix,
+        )
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
     compute_subdominance_matrix,
+    compute_subdominance_matrix_grouped,
 )
 
 def _parse_pairs(s: str):
@@ -49,6 +55,7 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--phase", type=int, default=0)
     ap.add_argument("--split", choices=["train", "eval"], default="eval")
+    ap.add_argument("--palette", choices=["paper", "vis"], default="vis")
     ap.add_argument("--n_rollouts", type=int, default=100, help="Number of rollouts to collect (default: number of demos in split).")
     ap.add_argument("--decision_threshold", type=float, default=0.5, help="Decision threshold for action sampling.")
     ap.add_argument("--pairs", default=None, help='Optional pairs like "0,1;0,3;2,4"')
@@ -62,6 +69,13 @@ def main():
     ap.add_argument("--r_opacity", type=float, default=.35)
     args = ap.parse_args()
 
+    annotation_keywords = [
+        "lr", "batch_size", "solver", "train", "stochastic", 
+        'init_noise_std', 'normalize_s_matrix', 'n_models', 'gamma_temperature',
+        'policy_sources', 'policy_mixture',
+        ]
+    ignore_keywords = ['learner']
+
     # Load
     model, cfg, demo = load_model_from_archive(
         archive_path=args.archive,
@@ -71,7 +85,19 @@ def main():
         use_safe_load=True,
         overwrite_demos = False,
     )
-    demos_all = demo.train_demos if args.split == "train" else demo.eval_demos
+    # Choose mode plotting colors
+    mode_palette = MODE_PALETTE_100_PAPERSAFE if args.palette == 'paper' else MODE_PALETTE_100_MAXVAR
+    # Get Demos and Demo Feats
+    s_train_demo_feats, s_eval_demo_feats = demo.get_rank_sorted_demo_feats()
+    if args.split == "train":
+        demos_all = demo.train_demos 
+        demo_feats = s_train_demo_feats
+    else:
+        demos_all = demo.eval_demos
+        demo_feats = s_eval_demo_feats
+        #  demos_all = demo.train_demos if args.split == "train" else demo.eval_demos
+    #  demo_feats = np.stack([d["fairness_feats"] for d in demos_all])  # [D, K]
+
     if demos_all is None or len(demos_all) == 0:
         raise RuntimeError(f"No demos found for split={args.split}")
 
@@ -91,20 +117,21 @@ def main():
     else:
         # Deterministic fallback: use the base collector if you exposed it, else minimal inline.
         if hasattr(model, "collect_eval_rollouts"):
-            rb = model.collect_eval_rollouts(demo,
-                                             demos=demos_sel, 
-                                             decision_threshold = args.decision_threshold,
-                                             n_rollouts = args.n_rollouts,
-                                             stochastic=args.stochastic,
-                                             use_demos_as_gtruth = args.use_demos_as_gtruth,
-                                             )
+            rb = model.collect_eval_rollouts(
+                demo,
+                demos=demos_sel, 
+                decision_threshold = args.decision_threshold,
+                n_rollouts = args.n_rollouts,
+                stochastic=args.stochastic,
+                use_demos_as_gtruth = args.use_demos_as_gtruth,
+                )
             rollout_feats = rb.feats.detach().cpu().numpy()
         else:
             raise RuntimeError("Model has neither collect_bayesian_rollouts nor collect_eval_rollouts.")
 
-    #  import ipdb;ipdb.set_trace()
-    # Demo feats
-    demo_feats = np.stack([d["fairness_feats"] for d in demos_all])  # [D, K]
+    # Get rollout groupings
+    rollout_groupings = rb.get_rollout_groupings_by_policy()
+    feats_by_mode = rb.feats_by_mode(as_numpy=True)
 
     # Plot
     pairs = _parse_pairs(args.pairs)
@@ -114,20 +141,22 @@ def main():
 
     #  alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
     alpha = 1.
-    #  import ipdb;ipdb.set_trace()
+
     # Plot All Feature vs Feature Pairs
     # =====================================================================================
     fig, axes = plot_rollouts_vs_demos_pairs(
-        #  rollout_feats,
-        rb.feats_by_mode(as_numpy=True),
+        feats_by_mode,
+        #  s_eval_demo_feats,
         demo_feats,
         feature_names=feature_names,
         pairs=pairs,
         title=title,
+        mode_colors = mode_palette,
         baselines = demo.meta['baseline_fairness_features'],
         alpha_rollouts = args.r_opacity,
     )
-
+    text = add_cfg_text_to_figure(fig, cfg, annotation_keywords, ignore_keywords = ignore_keywords, x=0.01, y=0.5, fontsize=9)
+    plt.tight_layout(rect=(0.18, 0.0, 1.0, 1.0))  # leave space on the left
     # Save
     if args.save_plot_dir is not None:
         save_dir = args.save_plot_dir 
@@ -142,11 +171,11 @@ def main():
     # Plot Zero One vs All Other Features
     # =====================================================================================
     fig, axes = plot_zero_one_vs_features(
-        #  rb,
-        rb.feats_by_mode(as_numpy=True),
+        feats_by_mode,
         demo_feats,
         feature_names=feature_names,
         baselines = demo.meta['baseline_fairness_features'],
+        mode_colors = mode_palette,
         alpha_rollouts = args.r_opacity,
     )
 
@@ -155,30 +184,82 @@ def main():
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print("Saved plot:", out_path)
+
     # Plot Subdominance as heatmap
     # =====================================================================================
-    S = compute_subdominance_matrix(
-            rollout_feats,
+    S = compute_subdominance_matrix_grouped(
+            feats_by_mode,
             demo_feats,
+            #  s_eval_demo_feats,
             mode=model.subdom_mode,
             alpha=alpha,
             beta=model.compute_beta(),
         )
-    fig, axes = plot_subdominance_heatmap(S)
+    sorted_rollout_groupings = []
+    idx_offset = 0
+    for m, mode in enumerate(feats_by_mode):
+        sorted_rollout_groupings.append([idx_offset+ i for i in range(len(mode))])
+        idx_offset += len(mode)
+
+    #  import ipdb;ipdb.set_trace()
+    fig, axes = plot_subdominance_heatmap(S, row_groups = sorted_rollout_groupings, group_colors = mode_palette, group_strip_width = 2.18)
 
     # Save
     out_path = os.path.join(save_dir, "Subdominance_heatmap.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
+
+    # Plot  Subdominance Indicator Matrix
+    # =====================================================================================
+    S_demo_roll = compute_subdominance_matrix(
+            demo_feats,
+            rollout_feats,
+            mode=model.subdom_mode,
+            alpha=alpha,
+            beta=model.compute_beta(),
+        )  # [D,R]
+    S_rev_ji = S_demo_roll.T  # [R,D]
+
+    reverse_subdom_beat_indicator = S <= S_rev_ji
+    beat_indicator = S <= 0.
+
+    fig, ax = plot_indicator_matrix(
+        reverse_subdom_beat_indicator,
+        row_groups= sorted_rollout_groupings,
+        group_colors = mode_palette,
+        title="S <= S_rev_ji Indicator Matrix with Row Groups",
+        group_strip_width = 2.18,
+        )
+    out_path = os.path.join(save_dir, "reverse_subdom_beat_indicator.png")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    fig, ax = plot_indicator_matrix(
+        beat_indicator,
+        row_groups=sorted_rollout_groupings,
+        group_colors = mode_palette,
+        title="Dominance Indicator Matrix with Row Groups",
+        group_strip_width = 2.18,
+        )
+    out_path = os.path.join(save_dir, "indicator.png")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
     # Plot Optimal Transport Coupling
     # =====================================================================================
     out = solve_stochastic_subdom_coupling(
             S,
             solver="sinkhorn",
             weight_method="primal",
-            normalize_subdom=True,
+            normalize_subdom=False,
     )
-    fig, axes = plot_ot_solution_heatmaps(out)
+    gamma_temp = cfg.learner.get('default').get('train').get('stochastic').get('gamma_temperature', 1.0)
+    #  import ipdb;ipdb.set_trace()
+    gamma_temp = 1.0
+    fig, axes = plot_ot_solution_heatmaps(out, gamma_temperature = gamma_temp, row_groups = sorted_rollout_groupings, 
+                                          group_strip_width = 2.18,
+                                          group_colors = mode_palette,
+                                          )
     # Save
     out_path = os.path.join(save_dir, "ot_solution.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")

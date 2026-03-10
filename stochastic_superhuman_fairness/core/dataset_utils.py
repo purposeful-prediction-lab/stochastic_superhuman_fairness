@@ -51,6 +51,32 @@ def load_adult_cfg(cfg, data_dir="./data"):
         normalize_mode=getattr(data_cfg, "normalize_mode", "continuous"),
     )
 
+def load_adult_csv(
+    csv_path,
+    label_col,
+    protected_attrs,
+    sensitive_attrs,
+    normalize,
+    one_hot,
+    train_ratio,
+    seed,
+    normalize_mode="continuous",
+):
+
+    return load_adult(
+        None,
+        label_col,
+        protected_attrs,
+        sensitive_attrs,
+        normalize,
+        one_hot,
+        train_ratio,
+        seed,
+        normalize_mode= normalize_mode,
+        csv_path = csv_path
+        )
+
+
 def load_adult(
     data_dir,
     label_col,
@@ -61,6 +87,7 @@ def load_adult(
     train_ratio,
     seed,
     normalize_mode="continuous",
+    csv_path: str = None,
 ):
     """
     Core Adult dataset loader (legacy-compatible signature).
@@ -68,10 +95,11 @@ def load_adult(
     - Protected attributes: removed from X.
     - Sensitive attributes: retained in X and populate A.
     """
-    dataset_path = Path(data_dir) / "adult"
-    dataset_path.mkdir(parents=True, exist_ok=True)
+    if data_dir is not None:
+        dataset_path = Path(data_dir) / "adult"
+        dataset_path.mkdir(parents=True, exist_ok=True)
 
-    csv_path = dataset_path / "adult_raw.csv"
+    csv_path = dataset_path / "adult_raw.csv" if csv_path is None else Path(csv_path)
     if not csv_path.exists():
         url = "https://archive.ics.uci.edu/ml/machine-learning-databases/adult/adult.data"
         df = pd.read_csv(url, header=None)
@@ -165,90 +193,6 @@ def load_adult(
         "metadata": meta,
     }
 
-def load_adult_old(data_dir, label_col, protected_attrs, sensitive_attrs, normalize, one_hot, train_ratio, seed, normalize_mode = "continuous"):
-    data_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = data_dir / "adult_raw.csv"
-    if not raw_path.exists():
-        _download_adult(raw_path)
-
-    df = pd.read_csv(raw_path, header=None, na_values=" ?", skipinitialspace=True)
-    df.columns = _adult_column_names()
-    df = _clean_adult(df)
-
-    protected_attrs = [] if protected_attrs is None else protected_attrs
-    protected = df[protected_attrs].copy()
-    features = df.drop(columns=protected_attrs + [label_col])
-    y = (df[label_col] == ">50K").astype(np.float32)
-
-    # One-hot / categorical encoding
-    if one_hot:
-        features = pd.get_dummies(features, drop_first=True)
-
-    # Ensure numeric
-    for col in features.columns:
-        if not np.issubdtype(features[col].dtype, np.number):
-            features[col] = pd.Categorical(features[col]).codes
-
-    features = features.apply(pd.to_numeric, errors="coerce").fillna(0)
-
-    # Determine column types
-    unique_counts = features.nunique()
-    is_cont = unique_counts > 2
-    cont_cols = features.columns[is_cont]
-    cat_cols = features.columns[~is_cont]
-
-    X = features.astype(np.float32).copy()
-    scaler = None
-    scaled_col_indices = []
-
-    # --- Normalization logic ---
-    if normalize and normalize_mode != "none":
-        scaler = StandardScaler()
-        if normalize_mode == "continuous":
-            X.loc[:, cont_cols] = scaler.fit_transform(X[cont_cols].to_numpy())
-            scaled_col_indices = [features.columns.get_loc(c) for c in cont_cols]
-        elif normalize_mode == "all":
-            X.loc[:, :] = scaler.fit_transform(X.to_numpy())
-            scaled_col_indices = list(range(X.shape[1]))
-
-    X = X.to_numpy(np.float32)
-    
-
-    # Encode protected attributes
-    protected_np = (protected.apply(pd.Categorical).apply(lambda s: s.cat.codes).to_numpy(np.float32))
-    # reset indices to make array indexing safe
-    import ipdb;ipdb.set_trace()
-
-    X_train, X_test, y_train, y_test, prot_train, prot_test = safe_train_test_split(
-        X, y, protected_np, train_ratio=train_ratio, seed=seed
-    )
-    y_train = np.array(y_train).astype(np.float32)
-    y_test = np.array(y_test).astype(np.float32)
-    prot_train = np.array(prot_train).astype(np.float32)
-    prot_test = np.array(prot_test).astype(np.float32)
-
-
-    return {
-        "X_train": X_train,
-        "X_test": X_test,
-        "y_train": y_train,
-        "y_test": y_test,
-        "protected_train": prot_train,
-        "protected_test": prot_test,
-        "feature_names": list(features.columns),
-        "protected_attrs": protected_attrs,
-        "scaler": scaler,
-        "scaled_col_indices": scaled_col_indices,
-        "cont_cols": list(cont_cols),
-        "cat_cols": list(cat_cols),
-        "metadata": {
-            "dataset": "adult",
-            "n_features": X.shape[1],
-            "n_samples": len(X),
-        },
-    }
-
-
 # =====================================================================
 # 2. COMPAS DATASET
 # =====================================================================
@@ -268,6 +212,32 @@ def load_compas_cfg(cfg, data_dir="./data"):
         normalize_mode=getattr(data_cfg, "normalize_mode", "continuous"),
     )
 
+def load_compas_csv(
+    csv_path,
+    label_col,
+    protected_attrs,
+    sensitive_attrs,
+    normalize,
+    one_hot,
+    train_ratio,
+    seed,
+    normalize_mode="continuous",
+):
+
+    return load_compas(
+        None,
+        label_col,
+        protected_attrs,
+        sensitive_attrs,
+        normalize,
+        one_hot,
+        train_ratio,
+        seed,
+        normalize_mode= normalize_mode,
+        csv_path = csv_path
+        )
+
+
 def load_compas(
     data_dir,
     label_col,
@@ -278,15 +248,17 @@ def load_compas(
     train_ratio,
     seed,
     normalize_mode="continuous",
+    csv_path: str = None,
 ):
     """
     Load COMPAS dataset (legacy-compatible signature).
     - Protected attrs: removed from X entirely.
     - Sensitive attrs: kept in X and used for A (sensitive variable).
     """
-    data_dir = Path(data_dir)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = data_dir / "compas_raw.csv"
+    if data_dir is not None:
+        data_dir = Path(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = data_dir / "compas_raw.csv" if csv_path is None else Path(csv_path)
     if not raw_path.exists():
         _download_compas(raw_path)
 
@@ -368,61 +340,6 @@ def load_compas(
         "protected_attrs": protected_attrs,
         "scaler": scaler,
         "metadata": meta,
-    }
-
-def load_compas_old(data_dir, label_col, protected_attrs, normalize, one_hot, train_ratio, seed):
-    data_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = data_dir / "compas_raw.csv"
-    if not raw_path.exists():
-        _download_compas(raw_path)
-
-    df = pd.read_csv(raw_path)
-    df = _clean_compas(df)
-
-    protected = df[protected_attrs].copy()
-    features = df.drop(columns=protected_attrs + [label_col])
-    y = df[label_col].astype(np.float32)
-
-    # One-hot / categorical encoding
-    if one_hot:
-        features = pd.get_dummies(features, drop_first=True)
-    for col in features.columns:
-        if not np.issubdtype(features[col].dtype, np.number):
-            features[col] = pd.Categorical(features[col]).codes
-    features = features.apply(pd.to_numeric, errors="coerce").fillna(0)
-
-    X = features.astype(np.float32).to_numpy()
-    scaler = None
-    if normalize:
-        scaler = StandardScaler()
-        X = scaler.fit_transform(X)
-
-    protected_np = protected.apply(pd.Categorical).apply(lambda s: s.cat.codes).to_numpy(np.float32)
-
-    X_train, X_test, y_train, y_test, prot_train, prot_test = safe_train_test_split(
-            X, y, protected_np, train_ratio=train_ratio, seed=seed
-        )
-    # reset indices to make array indexing safe
-    y_train = np.array(y_train).astype(np.float32)
-    y_test = np.array(y_test).astype(np.float32)
-    prot_train = np.array(prot_train).astype(np.float32)
-    prot_test = np.array(prot_test).astype(np.float32)
-
-    return {
-        "X_train": X_train,
-        "X_test": X_test,
-        "y_train": y_train,
-        "y_test": y_test,
-        "protected_train": prot_train,
-        "protected_test": prot_test,
-        "feature_names": list(features.columns),
-        "protected_attrs": protected_attrs,
-        "scaler": scaler,
-        "metadata": {
-            "dataset": "compas",
-            "n_features": X.shape[1],
-            "n_samples": len(X),
-        },
     }
 
 def _download_adult(save_path):

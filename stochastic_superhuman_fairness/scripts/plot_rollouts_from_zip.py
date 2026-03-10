@@ -134,7 +134,7 @@ def main():
     else:
         save_dir = os.path.join(os.path.dirname(os.path.abspath(args.archive)),'..',  'plots')
 
-    import ipdb;ipdb.set_trace()
+    #  import ipdb;ipdb.set_trace()
     os.makedirs(save_dir, exist_ok=True)
     out_path = os.path.join(save_dir, args.feat_vs_feats_name)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
