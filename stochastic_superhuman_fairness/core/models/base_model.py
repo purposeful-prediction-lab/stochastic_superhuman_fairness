@@ -124,23 +124,27 @@ class BaseModel(ABC, nn.Module):
             use_demos_as_gtruth = use_demos_as_gtruth,
         )
     @torch.no_grad()
-    def collect_eval_rollouts(self, demonstrator, demos=None, decision_threshold=0.5, n_rollouts: int = 10,
-                            use_demos_as_gtruth: bool = False,
-                            stochastic : bool = False):
+    def collect_eval_rollouts(self, demonstrator, demos=None,
+                    shared_x: bool = False,
+                    decision_threshold=0.5, n_rollouts: int = 10,
+                    use_demos_as_gtruth: bool = False,
+                    stochastic : bool = False):
         if demos is None:
             demos = demonstrator.test_demos
         return collect_rollouts(
             policy=self.get_policy(),
             demonstrator=demonstrator,
             demos=demos,
+            shared_x = shared_x,
             metrics_list=self.metrics_list,
             n_rollouts = n_rollouts,
             decision_threshold=decision_threshold,
             require_grad=False,
             detach_outputs=True,
             stochastic = stochastic,
-            sample_actions_fn=self.sample_actions, # <-- Use models sample fn
+            #  sample_actions_fn=self.sample_actions, # <-- Use models sample fn
             use_demos_as_gtruth = use_demos_as_gtruth,
+            return_logits = True,
         )
     # ----------------------------------------------------------
     def get_state_dict(self):

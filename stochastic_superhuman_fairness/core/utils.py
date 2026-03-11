@@ -2,7 +2,8 @@ from omegaconf import OmegaConf
 from types import SimpleNamespace
 import os, random, numpy as np, torch
 import torch
-
+import numpy as np
+import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression
 
 @torch.no_grad()
@@ -203,6 +204,24 @@ def minmax_normalize(S):
 
     return (S - S_min) / (S_max - S_min)
 
+def to_backend(x, like):
+    """Convert x to backend/dtype/device of like (torch or numpy)."""
+    import numpy as np, torch
+
+    if torch.is_tensor(like):                         # Torch backend
+        if x is None: return None
+        if torch.is_tensor(x): return x.to(like.device, like.dtype)
+        x = np.asarray(x)
+        return torch.as_tensor(x, device=like.device, dtype=like.dtype)
+
+    # NumPy backend
+    if x is None: return None
+    if torch.is_tensor(x): x = x.detach().cpu().numpy()
+    x = np.asarray(x)
+    tgt = like.dtype if hasattr(like, "dtype") else np.float32
+    return x.astype(tgt) if x.dtype != tgt else x
+
+
 def set_all_seeds(seed: int = 0):
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
@@ -280,3 +299,62 @@ def sample_actions_from_policy(
             y_hat = (probs >= decision_threshold).float()
         return (y_hat,) + (logits,)*return_logits + (probs,)*return_probs
 
+
+def trajectory_logprob(logits, labels, return_numpy=False, require_grad: bool = False ):
+    """
+    Compute log-probability of trajectories under Bernoulli logits.
+
+    Args
+    ----
+    logits : (R,S) tensor/array or list of tensors
+    labels : (R,S) or (S,)
+    return_numpy : return numpy instead of torch
+
+    Returns
+    -------
+    log_probs : (R,) log p(y | logits) for each rollout
+    """
+
+    ctx = torch.enable_grad() if require_grad else torch.no_grad()
+    with ctx:
+        # ---- convert logits ----
+        if isinstance(logits, list):
+            logits = torch.stack([
+                l if torch.is_tensor(l) else torch.tensor(l)
+                for l in logits
+            ])
+        elif not torch.is_tensor(logits):
+            logits = torch.tensor(logits)
+
+        R, S = logits.shape
+
+        # ---- convert labels ----
+        if isinstance(labels, list):
+            labels = torch.stack([
+                l if torch.is_tensor(l) else torch.tensor(l)
+                for l in labels
+            ])
+        elif not torch.is_tensor(labels):
+            labels = torch.tensor(labels)
+
+
+        #  import ipdb;ipdb.set_trace()
+        if labels.ndim == 1:  # (S,) -> repeat
+            labels = labels.unsqueeze(0).expand(R, -1)
+
+        if labels.shape != (R, S):
+            raise ValueError(f"labels must be (R,S) or (S,), got {labels.shape}")
+        labels = labels.to(logits.device)
+        labels = labels.float()
+
+        # ---- BCE with logits gives -log p(y|logits) elementwise ----
+        neg_logprob = F.binary_cross_entropy_with_logits(
+            logits, labels, reduction="none"
+        )  # (R,S)
+
+        logprob = -neg_logprob.sum(dim=1)  # trajectory log prob
+
+        if return_numpy:
+            return logprob.detach().cpu().numpy()
+
+        return logprob

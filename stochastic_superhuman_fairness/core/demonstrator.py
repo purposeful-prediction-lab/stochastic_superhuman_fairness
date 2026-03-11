@@ -21,7 +21,7 @@ class Demonstrator:
         self.sensitive_attrs = getattr(self.cfg.demonstrator, "sensitive_attrs", [])
         self.cache_dir = Path(self.cfg.demonstrator.cache_dir) / self.cfg.demonstrator.dataset
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-
+        self.shared_x = self.cfg.get('shared_x', False)
         self.dataset = None
         self.train_demos = None
         self.eval_demos = None
@@ -45,6 +45,13 @@ class Demonstrator:
         self.train_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.train_demo_feats)
         self.eval_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.eval_demo_feats)
 
+    #  def get_all_demo_labels(self):
+    #      if not hasattr(self, 'all_demo_labels'):
+    #          types = ['train', 'eval']
+    #          for t in types:
+    #              get = self__dict__[f'{t}_demos'].__getitem__
+    #              self.__dict__[f'{t}_all_demo_labels'] = [get(i) for i in self.__dict__[f'demo_ranking_{t}']]
+    #
     # --------------------------------------------------
     def compute_demo_ranking(self):
         self._compute_intra_demo_subdominance()

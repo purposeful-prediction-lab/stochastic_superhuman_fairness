@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
 from stochastic_superhuman_fairness.core.models.model_io_utils import load_model_from_archive
 from stochastic_superhuman_fairness.core.utils_io import load_metrics_jsonl
+from stochastic_superhuman_fairness.core.utils import trajectory_logprob
 from stochastic_superhuman_fairness.core.plotting.rollout_plots import plot_zero_one_vs_features_subplots, plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features
 from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_and_subdom
 from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
@@ -56,7 +57,8 @@ def main():
     ap.add_argument("--phase", type=int, default=0)
     ap.add_argument("--split", choices=["train", "eval"], default="eval")
     ap.add_argument("--palette", choices=["paper", "vis"], default="vis")
-    ap.add_argument("--n_rollouts", type=int, default=100, help="Number of rollouts to collect (default: number of demos in split).")
+    ap.add_argument("--per_policy_rollouts", type=int, default=10, help="Number of rollouts to collect, per policy.")
+    #  ap.add_argument("--n_rollouts", type=int, default=100, help="Number of rollouts to collect (default: number of demos in split).")
     ap.add_argument("--decision_threshold", type=float, default=0.5, help="Decision threshold for action sampling.")
     ap.add_argument("--pairs", default=None, help='Optional pairs like "0,1;0,3;2,4"')
     ap.add_argument("--stochastic", action="store_true", help="Enable stochastic label sampling for visualization.")
@@ -100,9 +102,10 @@ def main():
 
     if demos_all is None or len(demos_all) == 0:
         raise RuntimeError(f"No demos found for split={args.split}")
-
-    n_rollouts = args.n_rollouts if args.n_rollouts is not None else len(demos_all)
-    demos_sel = _choose_demos(demos_all, n=n_rollouts, seed=args.seed)
+    demo_labels = [d['y'] for d in demos_all]
+    per_policy_rollouts = args.per_policy_rollouts if args.per_policy_rollouts is not None else 10
+    #  n_rollouts = args.n_rollouts if args.n_rollouts is not None else len(demos_all)
+    demos_sel = _choose_demos(demos_all, n=len(demos_all), seed=args.seed)
     pcfg = cfg.phase_cfg
 
     # Collect rollouts (bayesian if available, otherwise deterministic)
@@ -120,14 +123,21 @@ def main():
             rb = model.collect_eval_rollouts(
                 demo,
                 demos=demos_sel, 
+                shared_x = demo.shared_x,
                 decision_threshold = args.decision_threshold,
-                n_rollouts = args.n_rollouts,
+                n_rollouts = per_policy_rollouts,
                 stochastic=args.stochastic,
                 use_demos_as_gtruth = args.use_demos_as_gtruth,
                 )
             rollout_feats = rb.feats.detach().cpu().numpy()
         else:
             raise RuntimeError("Model has neither collect_bayesian_rollouts nor collect_eval_rollouts.")
+
+    # We have made predictions on p * per policy rollouts times for our trajectories.
+    # Each per_policy_rollouts traj demarks a new policy. We want the logits of each demo from each policy.
+    # TODO: Demos are sorted now. Adddress that
+    demos_traj_logporobs = trajectory_logprob(rb.logits[::per_policy_rollouts], demo_labels)
+    import ipdb;ipdb.set_trace()
 
     # Get rollout groupings
     rollout_groupings = rb.get_rollout_groupings_by_policy()
@@ -137,7 +147,7 @@ def main():
     pairs = _parse_pairs(args.pairs)
     feature_names = getattr(model, "metrics_list", None)
     rtype = 'Stochastic' if args.stochastic else 'Deterministic'
-    title = f"{os.path.basename(args.archive)} | split={args.split} | R={n_rollouts}, {rtype} D={len(demos_all)}"
+    title = f"{os.path.basename(args.archive)} | split={args.split} | R/Policy={per_policy_rollouts}, {rtype} D={len(demos_all)}"
 
     #  alpha = model.compute_alpha(rollout_feats, demo.train_demo_means_sorted, mode = model.subdom_mode)
     alpha = 1.

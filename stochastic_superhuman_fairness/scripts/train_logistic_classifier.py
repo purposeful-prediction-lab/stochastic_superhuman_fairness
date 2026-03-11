@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 
 from stochastic_superhuman_fairness.core.baselines.logistic_regression import (
     train_logistic_from_demos,
+    logistic_training_settings,
 )
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features
 from stochastic_superhuman_fairness.core.demonstrator import Demonstrator
@@ -129,6 +130,8 @@ def main():
     parser.add_argument("--sensitive_attrs", nargs="*", default=None)
 
     # logistic args
+
+    parser.add_argument("--preset_qual", choices=["poor", "intermediate", 'high'], default=None)
     parser.add_argument("--solver", type=str, default="lbfgs")
     parser.add_argument("--C", type=float, default=1.0)
     parser.add_argument("--max_iter", type=int, default=200)
@@ -147,6 +150,21 @@ def main():
     if (args.cfg_path is None) == (args.raw_dataset_path is None):
         raise ValueError("Exactly one of --cfg_path or --raw_dataset_path must be provided.")
 
+    # If a preset qual setting is given use those settings
+    preset_tag = str(args.preset_qual) if args.preset_qual is not None else ''
+    if preset_tag is not None:
+        settings = logistic_training_settings(preset_tag)
+    else:
+        settings = {
+            "solver": args.solver,
+            "C": args.C,
+            "max_iter": args.max_iter,
+            "n_jobs": args.n_jobs,
+            "fit_intercept": args.fit_intercept,
+            "class_weight": args.class_weight,
+            "random_state": args.random_state,
+        }
+    settings['save_path'] = None
     # --------------------------------------------------
     # Path 1: Demonstrator
     # --------------------------------------------------
@@ -162,15 +180,8 @@ def main():
 
         model = train_logistic_from_demos(
             train_demos,
-            solver=args.solver,
-            C=args.C,
-            max_iter=args.max_iter,
-            n_jobs=args.n_jobs,
-            fit_intercept=args.fit_intercept,
-            class_weight=args.class_weight,
-            random_state=args.random_state,
-            save_path=None,
-        )
+            **settings,
+            )
 
         X_eval, y_eval, A_eval = concat_demo_split(eval_demos)
         y_demo = model.predict(X_eval)
@@ -182,14 +193,7 @@ def main():
         train_demo, X_eval, y_eval, A_eval, model_name = load_raw_dataset_split(args, return_name = True)
         model = train_logistic_from_demos(
             [train_demo],
-            solver=args.solver,
-            C=args.C,
-            max_iter=args.max_iter,
-            n_jobs=args.n_jobs,
-            fit_intercept=args.fit_intercept,
-            class_weight=args.class_weight,
-            random_state=args.random_state,
-            save_path=None,
+            **settings,
         )
 
         y_demo = model.predict(X_eval)
@@ -204,7 +208,7 @@ def main():
 
     save_path = args.save_path
     if save_path is None:
-        save_path = build_default_save_path(model_name, fairness_feats)
+        save_path = build_default_save_path(model_name+preset_tag, fairness_feats,)
 
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)

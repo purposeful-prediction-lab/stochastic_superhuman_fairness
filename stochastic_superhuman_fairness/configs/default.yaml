@@ -35,6 +35,7 @@ subdominance:
 # =========================
 demonstrator:
   dataset: "adult" # adult or compass
+  shared_x: True
   demotype: lrdecisions  # partition or lrdecisions
   # LR (Logistic Regression) Decisions Specific
   n_models: 100 # only used with lr decisions. How many classifier are trained. One per demo.
@@ -63,13 +64,15 @@ learner:
       eval_freq: 200
       train_print_freq: 100
       model_cfg:
-        policy_sources: ['random', 'logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
-        policy_mixture: [10,1]
-        n_models: 11
+        # policy_sources: ['random', 'logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
+        policy_sources: ['random']
+        policy_mixture: [1.]
+        n_models: 100
         init_noise_std: 0.3
       train:
         lr: 0.001
         batch_size: 100
+        n_rollouts: 2
         stochastic:
         
     # - algo: bayesianLogistic

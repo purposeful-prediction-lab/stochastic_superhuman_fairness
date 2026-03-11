@@ -30,20 +30,22 @@ def logistic_training_settings(level="medium"):
 
     level = level.lower()
 
-    if level == "poor":
+    if level == "poor" or level == 'low':
         return dict(
             solver="liblinear",
-            C=0.05,
-            max_iter=30,
+            C=0.000001,
+            max_iter=1,
+            class_weight = {0: 0.5, 1: 1.8},
             tol=1e-2,
             n_jobs=1,
         )
 
-    elif level == "medium":
+    elif level == "medium" or level == 'intermediate':
         return dict(
             solver="lbfgs",
             C=1.0,
-            max_iter=200,
+            max_iter=2,
+            class_weight = {0: 0.5, 1: 1.8},
             tol=1e-4,
             n_jobs=1,
         )
@@ -59,6 +61,7 @@ def logistic_training_settings(level="medium"):
 
     else:
         raise ValueError(f"Unknown level: {level}")
+
 def train_logistic_from_demos(
     demos,
     *,
@@ -109,6 +112,47 @@ def load_logistic_model(load_path):
     load_path = Path(load_path)
     return joblib.load(load_path)
 
+def sample_logistic_model(cfg, seed=None):
+    '''Sample a logistic model to serve as a demonstrator. Vary Regulirization type, level, class weight.'''
+    rng = np.random.default_rng(seed)
+
+    solvers = ["lbfgs", "liblinear", "saga"]
+    solver = rng.choice(solvers)
+
+    # Valid penalties per solver
+    if solver == "liblinear":
+        penalty = rng.choice(["l1", "l2"])
+    elif solver == "saga":
+        penalty = rng.choice(["l1", "l2", "elasticnet"])
+    else:  # lbfgs
+        penalty = "l2"
+
+    #  C = float(rng.lognormal(mean=0.0, sigma=1.0))  # wide variability
+    # vary regularization + class weights (clean)
+    C = 10 ** rng.uniform(-4, 4)  # 1e-4..1e4
+    cw = {0: float(10 ** rng.uniform(-0.5, 0.5)),
+          1: float(10 ** rng.uniform(-0.5, 0.5))}
+
+    max_iter = int(rng.integers(0,10))
+
+    l1_ratio = None
+    if penalty == "elasticnet":
+        l1_ratio = rng.uniform(0.0, 1.0)
+
+    lr = LogisticRegression(
+        solver=solver,
+        penalty=penalty,
+        C=C,
+        class_weight = cw,
+        max_iter=max_iter,
+        l1_ratio=l1_ratio,
+        n_jobs=int(getattr(cfg, "lr_n_jobs", 1)),
+        random_state=rng.integers(0, 10_000),
+    )
+
+    return lr
+
+
 
 # ============================================================================================================
 # SKLEARN TO Torch Helpers
@@ -128,27 +172,6 @@ def load_saved_sklearn_policy_into_torch(
     """
     sk_model = load_logistic_model(load_path)
     return sklearn_model_to_torch_module(sk_model, device = device, dtype = dtype)
-    #
-    #  in_features = int(sk_model.coef_.shape[1])
-    #  out_features = int(sk_model.coef_.shape[0])
-    #  #  import ipdb;ipdb.set_trace()
-    #
-    #  if out_features != 1:
-    #      raise ValueError(f"Expected binary logistic model with 1 output. Got {out_features}.")
-    #
-    #  pol = nn.Linear(in_features, out_features, bias=bias)
-    #
-    #  weight = torch.as_tensor(sk_model.coef_, dtype=dtype)
-    #  with torch.no_grad():
-    #      pol.weight.copy_(weight)
-    #
-    #      if pol.bias is not None:
-    #          if not hasattr(sk_model, "intercept_"):
-    #              raise ValueError("Sklearn model has no intercept_.")
-    #          bias_t = torch.as_tensor(sk_model.intercept_, dtype=dtype)
-    #          pol.bias.copy_(bias_t)
-    #
-    #  return pol.to(device)
 
 # ------------------------------------------------------------------------------------------
 
