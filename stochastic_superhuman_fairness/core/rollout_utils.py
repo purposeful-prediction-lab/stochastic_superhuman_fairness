@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union, Sequence
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import zero_one_loss, compute_fairness_features
 from stochastic_superhuman_fairness.core.utils import sample_actions_from_policy
+from stochastic_superhuman_fairness.core.utils import sample_binary_from_probs
 import numpy as np
 import warnings
 import torch
@@ -184,7 +185,7 @@ def _normalize_policies(policy):
 
     raise TypeError(f"Unsupported policy type: {type(policy)}")
 
-def collect_rollouts_Old(
+def collect_rollouts_ref(
     *,
     policy,
     demonstrator,
@@ -200,6 +201,7 @@ def collect_rollouts_Old(
     return_logits: bool = False,
     sample_actions_fn=None,   # if None and stochastic=True, use pol.sample_actions
     use_demos_as_gtruth: bool = False,
+    **kwargs,
 ):
     policies = _normalize_policies(policy)
     m = len(policies)
@@ -358,7 +360,7 @@ def collect_rollouts(
     pol_err = np.zeros(m, dtype=float)
     pol_count = np.zeros(m, dtype=float)
     total_err, total_count = 0.0, 0.0
-
+    #  import ipdb;ipdb.set_trace()
     with ctx:
         if shared_x:
             cached_logits, cached_probs = None, None

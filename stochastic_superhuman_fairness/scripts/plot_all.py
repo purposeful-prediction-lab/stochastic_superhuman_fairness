@@ -15,6 +15,7 @@ from stochastic_superhuman_fairness.core.plotting.plotting_palettes import MODE_
 from stochastic_superhuman_fairness.core.plotting.aux_plots import (
         plot_subdominance_heatmap, plot_optimal_transport_solution,
         plot_ot_solution_heatmaps, plot_indicator_matrix,
+        plot_dominance_counts,
         )
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
     compute_subdominance_matrix,
@@ -74,7 +75,9 @@ def main():
     annotation_keywords = [
         "lr", "batch_size", "solver", "train", "stochastic", 
         'init_noise_std', 'normalize_s_matrix', 'n_models', 'gamma_temperature',
-        'policy_sources', 'policy_mixture',
+        'policy_sources', 'policy_mixture', 'row_constraints',  'col_constraints',
+        'ot_temperature', 'gamma_temperature', 't_function',
+
         ]
     ignore_keywords = ['learner']
 
@@ -136,8 +139,8 @@ def main():
     # We have made predictions on p * per policy rollouts times for our trajectories.
     # Each per_policy_rollouts traj demarks a new policy. We want the logits of each demo from each policy.
     # TODO: Demos are sorted now. Adddress that
-    demos_traj_logporobs = trajectory_logprob(rb.logits[::per_policy_rollouts], demo_labels)
-    import ipdb;ipdb.set_trace()
+    #  demos_traj_logporobs = trajectory_logprob(rb.logits[::per_policy_rollouts], demo_labels)
+    #  import ipdb;ipdb.set_trace()
 
     # Get rollout groupings
     rollout_groupings = rb.get_rollout_groupings_by_policy()
@@ -221,8 +224,8 @@ def main():
 
     # Plot  Subdominance Indicator Matrix
     # =====================================================================================
-    S_demo_roll = compute_subdominance_matrix(
-            demo_feats,
+    S_demo_roll = compute_subdominance_matrix_grouped(
+            [demo_feats],
             rollout_feats,
             mode=model.subdom_mode,
             alpha=alpha,
@@ -275,14 +278,32 @@ def main():
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+    # =====================================================================================
+    # Log Plots
+    # =====================================================================================
+
     # Plot Losses
     # =====================================================================================
     log_dir = os.path.join(os.path.dirname(os.path.abspath(args.archive)), '..', 'metrics_log.jsonl')
     logs = load_metrics_jsonl(log_dir)
-    fig = plot_loss_and_subdom(logs)
+    fig, _ = plot_loss_and_subdom(logs)
     # Save
     out_path = os.path.join(save_dir, "losses.png")
     print(f'Saving losses.png to {out_path}')
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    # Plot Loss Term Activations
+    # =====================================================================================
+    #  fig, _ = plot_dominance_counts(logs)
+    fig, _ = plot_dominance_counts(
+        logs,
+        per_mode="train/l_terms/per_mode_dominant_rollouts",
+        x_timesteps= [i for i in range(0, len(logs), 40)],
+        palette= mode_palette,
+    )
+    # Save
+    out_path = os.path.join(save_dir, "loss_term_activation_counts.png")
+    print(f'Saving loss_term_activation_counts.png to {out_path}')
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 

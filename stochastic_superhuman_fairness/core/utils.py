@@ -14,6 +14,18 @@ def sample_binary_from_probs(probs: torch.Tensor) -> torch.Tensor:
     """
     return torch.bernoulli(probs).float()
 
+def sample_rollouts_from_probs(probs: torch.Tensor, n_rollouts: int) -> torch.Tensor:
+    """
+    probs: [P, N]
+    returns: [P, M, N]
+    """
+    if probs.ndim != 2:
+        raise ValueError(f"Expected probs to have shape [P, N], got {tuple(probs.shape)}")
+
+    P, N = probs.shape
+    probs_expanded = probs.unsqueeze(1).expand(P, n_rollouts, N)  # [P, M, N]
+    return torch.bernoulli(probs_expanded)
+
 class NamespaceDict(SimpleNamespace):
     """A SimpleNamespace with dict-like get() method and repr that hides internals."""
 

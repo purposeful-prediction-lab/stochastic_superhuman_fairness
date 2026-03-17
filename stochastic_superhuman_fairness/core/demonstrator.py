@@ -16,12 +16,13 @@ from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDi
 class Demonstrator:
     def __init__(self, cfg, auto_create: bool = True, to_torch: bool = True):
         self.cfg = normalize_cfg(cfg)
+        self.dcfg = self.cfg.get('demonstrator')
         self._resolve_defaults()
         self.protected_attrs = getattr(self.cfg.demonstrator, "protected_attrs", [])
         self.sensitive_attrs = getattr(self.cfg.demonstrator, "sensitive_attrs", [])
         self.cache_dir = Path(self.cfg.demonstrator.cache_dir) / self.cfg.demonstrator.dataset
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.shared_x = self.cfg.get('shared_x', False)
+        self.shared_x = self.dcfg.get('shared_x', False)
         self.dataset = None
         self.train_demos = None
         self.eval_demos = None
@@ -60,7 +61,6 @@ class Demonstrator:
         self.beat_rates_eval = compute_beat_rates(self.intra_S_eval)
         self.demo_ranking_eval = np.argsort(-self.beat_rates_eval)  # descending
 
-        #  import ipdb;ipdb.set_trace()
     def sort_demos_by_ranking(self):
         types = ['train', 'eval']
         for t in types:

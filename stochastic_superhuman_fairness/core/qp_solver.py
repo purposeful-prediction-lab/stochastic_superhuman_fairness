@@ -206,7 +206,6 @@ def _solve_qp_mosek_core(
     if verbose:
         print(f"[MOSEK] Solving QP with λ={lambda_reg:.1e}, τ={tau}, "
               f"rows={row_constraints}, cols={col_constraints}")
-
     # --- Marginals ---
     if rollout_marginals is None:
         p_samples = np.ones(num_samples) / num_samples
@@ -362,7 +361,10 @@ def _solve_sinkhorn_core(
         q = q / (s + 1e-12)
 
     # ---- kernel ----
+
+    #  import ipdb;ipdb.set_trace()
     S_shift = S - S.min()
+    #  S_shift = 1- S_shift
     K = np.exp(-S_shift / max(epsilon, 1e-12)) + 1e-300
 
     u = np.ones(num_samples) / num_samples
@@ -401,7 +403,7 @@ def _solve_sinkhorn_core(
             if err < tol:
                 break
 
-        if np.allclose(u, u_prev, atol=1e-14) and np.allclose(v, v_prev, atol=1e-14):
+        if np.allclose(u, u_prev, atol=tol*1e-2) and np.allclose(v, v_prev, atol=tol*1e-2):
             break
 
     gamma = (u[:, None] * K) * v[None, :]
@@ -410,13 +412,13 @@ def _solve_sinkhorn_core(
         print("Some gamma values negative; clipping to 0 (numerical tiny values).")
         gamma = np.clip(gamma, a_min=0.0, a_max=None)
 
+    #  import ipdb;ipdb.set_trace()
     if renormalize_gamma:
-        s = gamma.sum()
-        if s > 0:
-            gamma = gamma / s
+        row_sums = gamma.sum(axis=1, keepdims=True)
+        gamma = gamma / np.maximum(row_sums, 1e-6)
 
-    dual_rows = np.log(u + 1e-300) if row_constraints else np.zeros(num_samples)
-    dual_cols = np.log(v + 1e-300) if col_constraints else np.zeros(num_demos)
+    dual_rows = epsilon*np.log(u + 1e-300) if row_constraints else np.zeros(num_samples)
+    dual_cols = epsilon*np.log(v + 1e-300) if col_constraints else np.zeros(num_demos)
 
     if verbose:
         rs, cs = gamma.sum(axis=1), gamma.sum(axis=0)

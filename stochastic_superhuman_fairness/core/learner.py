@@ -55,10 +55,10 @@ class Learner:
         return new_model
 
     # ----------------------------------------------------------
-    def _log(self, stats: Dict[str, Any], verbose: bool = True):
+    def _log(self, stats: Dict[str, Any], verbose: bool = True, no_print_keys: list = []):
         """Pass metrics to logger (if available)."""
         if self.logger is not None:
-            self.logger.log(stats, verbose = verbose)
+            self.logger.log(stats, verbose = verbose, no_print = no_print_keys)
         else:
             print(stats)
 
@@ -96,7 +96,7 @@ class Learner:
                     "algo": algo,
                     "stage": "train"
                 })
-                self._log(stats_train, verbose = (ep % phase_cfg['train_print_freq'] == 0))
+                self._log(stats_train, verbose = (ep % phase_cfg['train_print_freq'] == 0), no_print_keys=['per_mode'])
 
                 # ---- Conditional evaluation ----
                 if (ep + 1) % eval_freq == 0:

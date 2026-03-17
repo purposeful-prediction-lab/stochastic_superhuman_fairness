@@ -83,9 +83,10 @@ class BaseModel(ABC, nn.Module):
         """
 
         #  import ipdb;ipdb.set_trace()
+        t_function= kwargs['t_function']
         tkwargs = {'batch_size':batch_size, 'alpha_updates': self.alpha_updates, **kwargs}
         tkwargs = flatten_dict(tkwargs, keep_path = False)
-        return self._train_one_epoch(demonstrator, no_update = False, **tkwargs)
+        return getattr(self, f'_train_one_epoch_{t_function}')(demonstrator, no_update = False, **tkwargs)
 
     # ----------------------------------------------------------
     def collect_training_rollouts(self, demonstrator, demos=None, decision_threshold: float=0.5, stochastic = True,

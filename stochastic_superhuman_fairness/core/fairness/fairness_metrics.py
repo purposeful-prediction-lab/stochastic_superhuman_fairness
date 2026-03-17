@@ -492,41 +492,49 @@ def compute_fairness_features(
 
     return feats_vec
 
-def compute_fairness_features_old(y_true, y_pred, a, 
-    metrics = ["D.DP", "D.EqOdds", "D.PRP", "D.Err"],
-    X = None,
-    weights: Union[list, np.ndarray, torch.Tensor] = None,
-    ):
+# ---------------------------------------------------------------------------------
+
+def compute_fairness_features_batched(
+    y_true,
+    y_pred_batch,   # [R, N] or [P, M, N]
+    a,
+    metrics=("D.DP", "D.EqOdds", "D.PRP", "D.Err"),
+    X=None,
+    weights=None,
+):
     """
-    Automatically picks numpy OR torch implementation.
-    X : Observations features. Currently unused, reserved  for any future metrics
-    Returns a vector of fairness metric values.
+    Batched version of compute_fairness_features.
+
+    Args:
+        y_true: [N]
+        y_pred_batch: [R, N] or any shape [..., N]
+        a: [N]
+    Returns:
+        feats: [R, K] or [..., K]
     """
-    feats = []
+    if not torch.is_tensor(y_pred_batch):
+        raise TypeError("compute_fairness_features_batched currently expects torch tensors")
 
-    use_torch = _is_torch(y_pred)
-    a = a.squeeze(-1)
-    #  import ipdb;ipdb.set_trace()
-    for m in metrics:
-        f_np, f_torch = FAIRNESS_REGISTRY[m]
-        if (m == 'D.PRP') or ('D.EqOdds' == m):
-            fargs = (y_true, y_pred, a)  
-        elif m == 'L.ZeroOne':
-            fargs = (y_true, y_pred)  
-        else:
-            fargs = (y_pred, a)
+    original_shape = y_pred_batch.shape[:-1]   # e.g. [R] or [P, M]
+    N = y_pred_batch.shape[-1]
+    y_pred_flat = y_pred_batch.reshape(-1, N)  # [B, N]
 
-        if use_torch:
-            feats.append(f_torch(*fargs))
-        else:
-            feats.append(f_np(*fargs))
+    def _single(y_pred_single):
+        return compute_fairness_features(
+            y_true=y_true,
+            y_pred=y_pred_single,
+            a=a,
+            metrics=metrics,
+            X=X,
+            weights=weights,
+        )  # [K]
 
-    # stack in correct backend
-    if use_torch:
-        return torch.stack(feats)
-    else:
-        return np.array(feats, dtype=np.float32)
+    # vmap over the rollout dimension
+    feats_flat = torch.vmap(_single)(y_pred_flat)   # [B, K]
 
+    K = feats_flat.shape[-1]
+    feats = feats_flat.reshape(*original_shape, K)
+    return feats
 # ---------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------
@@ -537,3 +545,181 @@ METRIC_REGISTRY = {
     "D.Err": lambda y_true, y_pred, a: prediction_error_disparity(y_true, y_pred, a),
     "L.ZeroOne": zero_one_loss,
 }
+
+#=============================================================================================================
+# Batched VErsions
+#=============================================================================================================
+
+def _to_bool01_torch_batched(y: torch.Tensor) -> torch.Tensor:
+    y = y.reshape(-1)
+    if y.is_floating_point():
+        return y > 0.5
+    return y > 0
+
+
+def _to_bool_a_torch_batched(a: torch.Tensor) -> torch.Tensor:
+    return a.reshape(-1) > 0
+
+
+def _rate_with_smoothing_torch(num: torch.Tensor, den: torch.Tensor, alpha: float) -> torch.Tensor:
+    return (num + alpha) / (den + 2.0 * alpha)
+
+
+def demographic_parity_torch_batched(
+    y_pred_batch: torch.Tensor,   # [B, N]
+    a: torch.Tensor,              # [N]
+    thresh: float = 0.5,
+) -> torch.Tensor:
+    a1 = _to_bool_a_torch_batched(a)                  # [N]
+    y_hat = y_pred_batch > thresh                     # [B, N]
+
+    g0 = (~a1).unsqueeze(0)                           # [1, N]
+    g1 = a1.unsqueeze(0)                              # [1, N]
+
+    n0 = g0.sum(dim=1).clamp_min(1).float()          # [1]
+    n1 = g1.sum(dim=1).clamp_min(1).float()          # [1]
+
+    p0 = (y_hat & g0).sum(dim=1).float() / n0        # [B]
+    p1 = (y_hat & g1).sum(dim=1).float() / n1        # [B]
+    return (p0 - p1).abs()
+
+
+def equalized_odds_torch_batched(
+    y_true: torch.Tensor,         # [N]
+    y_pred_batch: torch.Tensor,   # [B, N]
+    a: torch.Tensor,              # [N]
+    thresh: float = 0.5,
+    alpha: float = 1.0,
+) -> torch.Tensor:
+    y = _to_bool01_torch_batched(y_true).unsqueeze(0)    # [1, N]
+    a1 = _to_bool_a_torch_batched(a).unsqueeze(0)        # [1, N]
+    y_hat = y_pred_batch > thresh                        # [B, N]
+
+    g0 = ~a1
+    g1 = a1
+    y_pos = y
+    y_neg = ~y
+
+    tp0 = (y_hat & g0 & y_pos).sum(dim=1).float()
+    pos0 = (g0 & y_pos).sum(dim=1).float()
+    fp0 = (y_hat & g0 & y_neg).sum(dim=1).float()
+    neg0 = (g0 & y_neg).sum(dim=1).float()
+
+    tp1 = (y_hat & g1 & y_pos).sum(dim=1).float()
+    pos1 = (g1 & y_pos).sum(dim=1).float()
+    fp1 = (y_hat & g1 & y_neg).sum(dim=1).float()
+    neg1 = (g1 & y_neg).sum(dim=1).float()
+
+    tpr0 = _rate_with_smoothing_torch(tp0, pos0, alpha)
+    fpr0 = _rate_with_smoothing_torch(fp0, neg0, alpha)
+    tpr1 = _rate_with_smoothing_torch(tp1, pos1, alpha)
+    fpr1 = _rate_with_smoothing_torch(fp1, neg1, alpha)
+
+    return 0.5 * ((tpr0 - tpr1).abs() + (fpr0 - fpr1).abs())
+
+
+def predictive_rate_parity_torch_batched(
+    y_true: torch.Tensor,         # [N]
+    y_pred_batch: torch.Tensor,   # [B, N]
+    a: torch.Tensor,              # [N]
+    thresh: float = 0.5,
+    alpha: float = 1.0,
+) -> torch.Tensor:
+    y = _to_bool01_torch_batched(y_true).unsqueeze(0)    # [1, N]
+    a1 = _to_bool_a_torch_batched(a).unsqueeze(0)        # [1, N]
+    y_hat = y_pred_batch > thresh                        # [B, N]
+
+    g0 = ~a1
+    g1 = a1
+
+    pred_pos0 = y_hat & g0
+    pred_pos1 = y_hat & g1
+
+    tp0 = (pred_pos0 & y).sum(dim=1).float()
+    pp0 = pred_pos0.sum(dim=1).float()
+    tp1 = (pred_pos1 & y).sum(dim=1).float()
+    pp1 = pred_pos1.sum(dim=1).float()
+
+    ppv0 = _rate_with_smoothing_torch(tp0, pp0, alpha)
+    ppv1 = _rate_with_smoothing_torch(tp1, pp1, alpha)
+    return (ppv0 - ppv1).abs()
+
+
+def prediction_error_disparity_torch_batched(
+    y_true: torch.Tensor,         # [N]
+    y_pred_batch: torch.Tensor,   # [B, N]
+    a: torch.Tensor,              # [N]
+    thresh: float = 0.5,
+    alpha: float = 1.0,
+) -> torch.Tensor:
+    y = _to_bool01_torch_batched(y_true).unsqueeze(0)    # [1, N]
+    a1 = _to_bool_a_torch_batched(a).unsqueeze(0)        # [1, N]
+    y_hat = y_pred_batch > thresh                        # [B, N]
+    err = y_hat != y                                     # [B, N]
+
+    g0 = ~a1
+    g1 = a1
+
+    e0 = (err & g0).sum(dim=1).float()
+    n0 = g0.sum(dim=1).float()
+    e1 = (err & g1).sum(dim=1).float()
+    n1 = g1.sum(dim=1).float()
+
+    r0 = _rate_with_smoothing_torch(e0, n0, alpha)
+    r1 = _rate_with_smoothing_torch(e1, n1, alpha)
+    return (r0 - r1).abs()
+
+
+def zero_one_loss_torch_batched(
+    y_true: torch.Tensor,         # [N]
+    y_pred_batch: torch.Tensor,   # [B, N]
+) -> torch.Tensor:
+    y_true = y_true.reshape(1, -1).float()
+    if y_pred_batch.dtype.is_floating_point:
+        y_pred_batch = (y_pred_batch > 0.5).float()
+    return (y_pred_batch != y_true).float().mean(dim=1)
+
+
+def compute_fairness_features_batched_fast(
+    y_true,
+    y_pred_batch,   # [B, N] or [P, M, N]
+    a,
+    metrics=("D.DP", "D.EqOdds", "D.PRP", "D.Err"),
+    X=None,
+    weights: Union[list, np.ndarray, torch.Tensor] = None,
+):
+    if not torch.is_tensor(y_pred_batch):
+        raise TypeError("compute_fairness_features_batched_fast expects torch tensors")
+
+    original_shape = y_pred_batch.shape[:-1]
+    N = y_pred_batch.shape[-1]
+    y_pred_flat = y_pred_batch.reshape(-1, N)  # [B, N]
+
+    feats = []
+    for m in metrics:
+        if m == "D.DP":
+            feats.append(demographic_parity_torch_batched(y_pred_flat, a))
+        elif m == "D.EqOdds":
+            feats.append(equalized_odds_torch_batched(y_true, y_pred_flat, a))
+        elif m == "D.PRP":
+            feats.append(predictive_rate_parity_torch_batched(y_true, y_pred_flat, a))
+        elif m == "D.Err":
+            feats.append(prediction_error_disparity_torch_batched(y_true, y_pred_flat, a))
+        elif m == "L.ZeroOne":
+            feats.append(zero_one_loss_torch_batched(y_true, y_pred_flat))
+        else:
+            raise ValueError(f"Unsupported metric: {m}")
+
+    feats_flat = torch.stack(feats, dim=1)  # [B, K]
+
+    if weights is not None:
+        if len(weights) != len(metrics):
+            raise ValueError(f"weights must have length {len(metrics)} (got {len(weights)})")
+        if not torch.is_tensor(weights):
+            weights = torch.tensor(weights, dtype=feats_flat.dtype, device=feats_flat.device)
+        else:
+            weights = weights.to(dtype=feats_flat.dtype, device=feats_flat.device)
+        feats_flat = feats_flat * weights.unsqueeze(0)
+
+    K = feats_flat.shape[-1]
+    return feats_flat.reshape(*original_shape, K)

@@ -78,4 +78,4 @@ def plot_loss_and_subdom(
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
 
     plt.tight_layout()
-    return fig
+    return fig, ax1

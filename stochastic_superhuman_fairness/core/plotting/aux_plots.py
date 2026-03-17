@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import torch
 from stochastic_superhuman_fairness.core.plotting.plot_utils import  _add_row_group_colors_to_heatmap
 
+
 def plot_subdominance_heatmap(
     S,
     *,
@@ -463,3 +464,223 @@ def save_heatmap(
     plt.tight_layout()
     plt.savefig(filename, dpi=300)
     plt.close()
+
+def plot_dominance_counts(
+    logs,
+    *,
+    title="Dominance counts per epoch",
+    figsize=(9, 4),
+    per_mode=None,          # None | key path str | list aligned with logs
+    x_timesteps=None,       # list of epoch indices at which to draw per-mode bars
+    palette=None,           # list of colors, one per mode
+    annotate_per_mode: bool = False,
+    bar_width=12.35,
+    bar_alpha=0.65,
+):
+    """
+    Plot dominant_rollouts and dominant_demos over epochs.
+
+    Optionally overlay stacked vertical bars at selected x_timesteps, where each
+    cell is the corresponding value of per-mode dominant rollouts at that epoch.
+
+    The first mode is the TOPMOST cell, colored with palette[0], second with
+    palette[1], etc.
+
+    Parameters
+    ----------
+    logs : list[dict]
+        Output of load_metrics_jsonl(log_dir), one dict per epoch.
+
+    per_mode : None | str | list
+        If not None:
+          - str: key path to read from each log entry, e.g.
+                 "train/lterms/per_mode_dominant_rollouts"
+          - list: already extracted per-epoch values aligned with logs
+                  each entry should be a sequence of mode counts
+
+    x_timesteps : list[int] | None
+        Epoch indices at which to draw the stacked per-mode bars.
+        Defaults to all plotted epochs if per_mode is provided.
+
+    palette : list[str] | None
+        Colors for modes. If None, matplotlib tab10 is used.
+
+    Returns
+    -------
+    fig, ax
+    """
+    def _get_nested_mixed(d, path, default=None):
+        if not isinstance(d, dict):
+            return default
+        if path in d:
+            return d[path]
+
+        parts = path.split("/")
+        cur = d
+        i = 0
+        while i < len(parts):
+            if not isinstance(cur, dict):
+                return default
+
+            found = False
+            # try longest possible slash-joined key first
+            for j in range(len(parts), i, -1):
+                key = "/".join(parts[i:j])
+                if key in cur:
+                    cur = cur[key]
+                    i = j
+                    found = True
+                    break
+
+            if not found:
+                return default
+
+        return cur
+
+    dom_rollouts, dom_demos, epochs = [], [], []
+
+    for i, log in enumerate(logs):
+        ltd = log.get("train/l_terms", {})
+        if "dominant_rollouts" not in ltd or "dominant_demos" not in ltd:
+            continue
+        epochs.append(i)
+        dom_rollouts.append(ltd["dominant_rollouts"])
+        dom_demos.append(ltd["dominant_demos"])
+
+    if not epochs:
+        raise ValueError("No log entries with loss_term_dict dominant counts were found.")
+
+    dom_rollouts = np.asarray(dom_rollouts, dtype=float)
+    dom_demos = np.asarray(dom_demos, dtype=float)
+    epochs = np.asarray(epochs, dtype=int)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    ax.plot(epochs, dom_demos, label="dominant_demos")
+    ax.plot(epochs, dom_rollouts,  label="dominant_rollouts")
+
+    # Optional per-mode stacked bars
+    if per_mode is not None:
+        if isinstance(per_mode, str):
+            per_mode_vals = [_get_nested_mixed(log, per_mode, None) for log in logs]
+        else:
+            per_mode_vals = per_mode
+
+        if len(per_mode_vals) != len(logs):
+            raise ValueError("per_mode must be aligned with logs (same length).")
+
+        if x_timesteps is None:
+            x_timesteps = epochs.tolist()
+
+        # infer number of modes from first available entry
+        first_valid = next((v for v in per_mode_vals if v is not None), None)
+        if first_valid is None:
+            raise ValueError("per_mode was provided, but no valid entries were found.")
+
+        n_modes = len(first_valid)
+        if palette is None:
+            cmap = plt.cm.get_cmap("tab10", n_modes)
+            palette = [cmap(i) for i in range(n_modes)]
+        if len(palette) < n_modes:
+            raise ValueError(f"palette must have at least {n_modes} colors.")
+
+        
+    for x in x_timesteps:
+        if x < 0 or x >= len(per_mode_vals) or per_mode_vals[x] is None:
+            continue
+
+        vals = np.asarray(per_mode_vals[x], dtype=float).reshape(-1)
+        if vals.size != n_modes:
+            raise ValueError(
+                f"Inconsistent per_mode size at timestep {x}: "
+                f"expected {n_modes}, got {vals.size}."
+            )
+
+        bottom = 0.0
+
+        # draw bottom → top so that mode 0 appears at the top
+        for mode_idx in reversed(range(n_modes)):
+            h = vals[mode_idx]
+
+            ax.bar(
+                x,
+                h,
+                width=bar_width,
+                bottom=bottom,
+                color=palette[mode_idx],
+                alpha=bar_alpha,
+                align="center",
+                edgecolor="none",
+                zorder=0,
+            )
+
+            if annotate_per_mode:
+                # ---- annotate the cell ----
+                ax.text(
+                    x,
+                    bottom + h / 2,
+                    f"{int(h)}",
+                    ha="center",
+                    va="center",
+                    fontsize=5,
+                    color="black",
+                    zorder=5,
+                )
+
+            bottom += h
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("count")
+    ax.set_title(title)
+    ax.legend()
+    if per_mode is not None:
+        ax.text(
+            0.01, 0.98,
+            "Stacked bars: per-mode dominant rollouts (counts)",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8, edgecolor="none"),
+        )
+    fig.tight_layout()
+    return fig, ax
+#  def plot_dominance_counts(logs, *, title="Dominance counts per epoch", figsize=(8, 4)):
+#      """
+#      Plot dominant_rollouts and dominant_demos over epochs.
+#
+#      Parameters
+#      ----------
+#      logs : list[dict]
+#          Output of load_metrics_jsonl(log_dir), one dict per epoch.
+#          Expected structure:
+#              log["loss_term_dict"]["dominant_rollouts"]
+#              log["loss_term_dict"]["dominant_demos"]
+#
+#      Returns
+#      -------
+#      fig, ax
+#      """
+#      dom_rollouts = []
+#      dom_demos = []
+#      epochs = []
+#
+#      for i, log in enumerate(logs):
+#          ltd = log.get("train/l_terms", {})
+#          if "dominant_rollouts" not in ltd or "dominant_demos" not in ltd:
+#              continue
+#          epochs.append(i)
+#          dom_demos.append(ltd["dominant_demos"])
+#          dom_rollouts.append(ltd["dominant_rollouts"])
+#
+#      if not epochs:
+#          raise ValueError("No log entries with loss_term_dict dominant counts were found.")
+#
+#      fig, ax = plt.subplots(1, 1, figsize=figsize)
+#      ax.plot(epochs, dom_demos, label="dominant_demos")
+#      ax.plot(epochs, dom_rollouts, label="dominant_rollouts")
+#
+#      ax.set_xlabel("epoch")
+#      ax.set_ylabel("count")
+#      ax.set_title(title)
+#      ax.legend()
+#      fig.tight_layout()
+#      return fig, ax
