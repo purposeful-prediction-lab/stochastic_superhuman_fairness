@@ -203,8 +203,9 @@ class Logger:
     def log(self, record: dict, flatten: bool = False, keep_path: bool = True, verbose: bool = True, 
             no_print: list = []):
 
-        no_print += ['time','algo','epoch','phase']
-        record = {k: v for k, v in record.items() if v is not None}
+        no_print += ['time','algo','epoch','phase', 'gamma_matrix']
+
+        record = {k: v for k, v in record.items() if (v is not None) and (k != 'gamma_matrix')}
         if flatten:
             record = flatten_record(record, keep_path=keep_path)
         record = {k: make_json_safe(v) for k, v in record.items()}

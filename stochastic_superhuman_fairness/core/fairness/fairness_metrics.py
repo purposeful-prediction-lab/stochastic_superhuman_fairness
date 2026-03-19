@@ -458,7 +458,7 @@ def compute_fairness_features(
 ):
     feats = []
     use_torch = _is_torch(y_pred)
-    a = a.squeeze(-1)
+    a = a.squeeze(-1) if len(a.shape) > 1 else a.squeeze()
 
     for m in metrics:
         f_np, f_torch = FAIRNESS_REGISTRY[m]

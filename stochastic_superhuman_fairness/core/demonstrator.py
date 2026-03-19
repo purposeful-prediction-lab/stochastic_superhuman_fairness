@@ -22,6 +22,9 @@ class Demonstrator:
         self.sensitive_attrs = getattr(self.cfg.demonstrator, "sensitive_attrs", [])
         self.cache_dir = Path(self.cfg.demonstrator.cache_dir) / self.cfg.demonstrator.dataset
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Diagnostics Dataset dir
+        self.diagnostics_dir = self.cache_dir / "diagnostics"
+        self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
         self.shared_x = self.dcfg.get('shared_x', False)
         self.dataset = None
         self.train_demos = None
@@ -37,8 +40,16 @@ class Demonstrator:
             self.create_demos(to_torch = self.to_torch_flag)
             self._compute_standalone_demofeats()
         self.compute_demo_ranking()
+        self.keep_only_requested_fairness_metrics(required_metrics=self.metrics)
+        #  import ipdb;ipdb.set_trace()
 
+    
     # --------------------------------------------------
+    #  def get_top_k(self, k : float):
+    #      if (k>0) and (k <=1.):
+    #          int_k = int(k*len(self.train_demo_feats))
+    #      elif k >  self.num_demos_train:
+    #          int_k = self.num_demos_train
 
     def _compute_standalone_demofeats(self):
         self.train_demo_feats = np.stack([d["fairness_feats"] for d in self.train_demos])  # [D,K]      
@@ -55,6 +66,8 @@ class Demonstrator:
     #
     # --------------------------------------------------
     def compute_demo_ranking(self):
+        self.num_demos_train = len(self.train_demo_feats)
+        self.num_demos_eval = len(self.eval_demo_feats)
         self._compute_intra_demo_subdominance()
         self.beat_rates_train = compute_beat_rates(self.intra_S)
         self.demo_ranking_train = np.argsort(-self.beat_rates_train)  # descending
@@ -209,6 +222,7 @@ class Demonstrator:
 
     def create_demos(self, resample=False, to_torch: bool = True):
 
+        #  import ipdb;ipdb.set_trace()
         sample_override = getattr(self.cfg.demonstrator, "demo_sample", None)
 
         if sample_override:
@@ -238,7 +252,8 @@ class Demonstrator:
                 self.train_demos = out["train_demos"].tolist()
                 self.eval_demos = out["eval_demos"].tolist()
                 self.meta = out.get("metadata", {}).tolist()
-                print("\nNo metadata found in npz!...\n")
+                if self.meta == {}:
+                    print("\nNo metadata found in npz!...\n")
             else:
                 out = np.load(np_path, allow_pickle=True).item()
                 self.meta = out.get("metadata", safe_json_load(meta_path) if meta_path.exists() else {})
@@ -246,6 +261,7 @@ class Demonstrator:
                 self.eval_demos = out["eval_demos"]
             print(f"📂 Loaded cached demos from {np_path}")
 
+            self.maybe_apply_diagnostics()
             if to_torch:
                 self.to_torch(device=self.device)
 
@@ -310,7 +326,7 @@ class Demonstrator:
             safe_json_dump(meta_pure, meta_path)
 
         print(f"💾 Saved sample {self.sample_id} demos to {np_path}")
-
+        self.maybe_apply_diagnostics()
         if to_torch:
             self.to_torch(device=self.device)
 
@@ -381,8 +397,13 @@ class Demonstrator:
         return demos
 
     def _compute_random_fairness(self):
-        rng = np.random.default_rng()
-        rand_bin = (rng.random(self.train_demos[0]['y'].shape) > 0.5).astype(int)
+        y = self.train_demos[0]["y"]
+        if isinstance(y, torch.Tensor):
+            rand_bin = (torch.rand_like(y, dtype=torch.float32) > 0.5).to(y.dtype)
+        else:
+            rand_bin = (np.random.random(y.shape) > 0.5).astype(y.dtype)
+        #  rng = np.random.default_rng()
+        #  rand_bin = (rng.random(self.train_demos[0]['y'].shape) > 0.5).astype(int)
         return compute_fairness_features(
                 self.train_demos[0]['y'],
                 rand_bin,
@@ -397,7 +418,9 @@ class Demonstrator:
                 self.cfg.get('demonstrator').get('metrics'))
 
     def _compute_majority_fairness(self):
-        majority_labels = np.ones_like(self.train_demos[0]['y']) if self.train_demos[0]['y'].mean() >= 0.5 else np.zeros_like(self.train_demos[0]['y'])
+        #  majority_labels = np.ones_like(self.train_demos[0]['y']) if self.train_demos[0]['y'].mean() >= 0.5 else np.zeros_like(self.train_demos[0]['y'])
+        y = self.train_demos[0]["y"]
+        majority_labels = y * 0 + (1 if (y.float().mean() if hasattr(y, "float") else y.mean()) >= 0.5 else 0)
         return compute_fairness_features(
                 self.train_demos[0]['y'],
                 majority_labels,
@@ -410,10 +433,19 @@ class Demonstrator:
             for d in demos:
                 y_true = d["y"]
                 a = d["A"][:, 0] if d["A"] is not None else np.zeros_like(y_true)
-                y_pred = y_true
-                demo_metrics = {m: float(METRIC_REGISTRY[m](y_true, y_pred, a)) for m in metrics}
-                results.append(demo_metrics)
-            global_metrics = {m: float(np.mean([dm[m] for dm in results])) for m in metrics}
+                y_pred = d['y_demo']
+                fairness_feats = compute_fairness_features(
+                                y_true,
+                                y_pred,
+                                a,
+                                metrics=metrics,
+                            )
+                if torch.is_tensor(fairness_feats):
+                    fairness_feats = fairness_feats.detach().cpu().numpy()
+
+                results.append(fairness_feats)
+            global_metrics = {m: float(np.mean([dm[i] for dm in results])) for i,m in enumerate(metrics)}
+            #  import ipdb;ipdb.set_trace()
             return {"local": results, "global": global_metrics}
 
     def _create_demos_lrdecisions(self, X, y, A, is_eval: bool = False):
@@ -451,7 +483,6 @@ class Demonstrator:
             lr.fit(X[idx], y[idx])
             # Make decisions  with different thresholds for variablity
             y_demo = lr.predict_proba(X)[:, 1].astype(np.float32)  # decisions on full set, returns probs
-            #  import ipdb;ipdb.set_trace()
             threshold = rng.uniform(0.35, 0.85)
             y_demo_zero_one = (lr.predict_proba(X)[:, 1] >= threshold).astype(np.float32)
 
@@ -497,6 +528,15 @@ class Demonstrator:
         for k in keys_to_check:
             old_val = old_meta.get(k, None)
             new_val = (self.device if k == 'device' else getattr(self.cfg.demonstrator, k, None))
+            if k == "metrics":
+
+                old_set = set(old_val)
+                new_set = set(new_val) if new_val is not None else set()
+                # allow if new ⊆ old
+                if not new_set.issubset(old_set):
+                    print(f"⚠️ Metadata mismatch on '{k}': {old_val} → {new_val}")
+                    return True
+                continue  # valid subset → no mismatch
             if old_val != new_val:
                 print(f"⚠️ Metadata mismatch on '{k}': {old_val} → {new_val}")
                 return True
@@ -608,6 +648,147 @@ class Demonstrator:
                 for k in ["X", "y", "A"]:
                     d[k] = torch.as_tensor(d[k], dtype=torch.float32, device=device)
         return batch_demos
+    def keep_only_requested_fairness_metrics(
+        self,
+        required_metrics=None,
+        update_cfg: bool = True,
+        recompute_baselines: bool = True,
+    ):
+        """
+        Keep only the requested fairness metrics in each demo's fairness_feats.
+
+        If the currently loaded demos already contain all requested metrics,
+        slice fairness_feats using the metric order stored in self.meta["metrics"].
+
+        If any requested metric is missing, recompute fairness_feats from scratch
+        for both train and eval demos using the requested metrics.
+
+        Assumptions
+        -----------
+        - self.meta["metrics"] order matches the order in d["fairness_feats"].
+        - If a demo has y_demo, that should be used as prediction target.
+          Otherwise use y.
+
+        Parameters
+        ----------
+        required_metrics : list[str] | None
+            Metrics to keep. If None, uses self.cfg.demonstrator.metrics.
+        update_cfg : bool
+            If True, also update self.cfg.demonstrator.metrics.
+        recompute_baselines : bool
+            If True, recompute baseline fairness features after metric change.
+        """
+        if self.train_demos is None or self.eval_demos is None:
+            raise ValueError("No demos loaded. Call create_demos() or _load_sample() first.")
+
+        if required_metrics is None:
+            required_metrics = list(self.cfg.demonstrator.metrics)
+        else:
+            required_metrics = list(required_metrics)
+
+        if len(required_metrics) == 0:
+            raise ValueError("required_metrics cannot be empty.")
+
+        loaded_metrics = []
+        if hasattr(self, "meta") and self.meta is not None:
+            loaded_metrics = list(self.meta.get("metrics", []) or [])
+
+        # ------------------------------------------------------------------
+        # Helper: recompute fairness feats for one demo
+        # ------------------------------------------------------------------
+        def _recompute_demo_fairness_feats(d, metrics):
+            y_true = d["y"]
+            y_pred = self.get_targets(d)
+            A = d["A"]
+            X = d.get("X", None)
+
+            ff = compute_fairness_features(
+                torch.as_tensor(y_true, dtype=torch.float32),
+                torch.as_tensor(y_pred, dtype=torch.float32),
+                torch.as_tensor(A, dtype=torch.float32),
+                metrics=metrics,
+                X=None if X is None else torch.as_tensor(X, dtype=torch.float32),
+            )
+            d["fairness_feats"] = ff.detach().cpu().numpy()
+            return d
+
+        # ------------------------------------------------------------------
+        # Case 1: all requested metrics already exist -> slice only
+        # ------------------------------------------------------------------
+        can_slice = (
+            len(loaded_metrics) > 0
+            and all(m in loaded_metrics for m in required_metrics)
+        )
+
+        if can_slice:
+            metric_to_idx = {m: i for i, m in enumerate(loaded_metrics)}
+            keep_idx = [metric_to_idx[m] for m in required_metrics]
+
+            def _slice_bucket(demos):
+                for d in demos:
+                    ff = d.get("fairness_feats", None)
+                    if ff is None:
+                        # fallback to recompute if a demo is malformed
+                        _recompute_demo_fairness_feats(d, required_metrics)
+                    else:
+                        ff = np.asarray(ff)
+                        if ff.ndim != 1 or ff.shape[0] < max(keep_idx) + 1:
+                            _recompute_demo_fairness_feats(d, required_metrics)
+                        else:
+                            d["fairness_feats"] = ff[keep_idx]
+                return demos
+
+            self.train_demos = _slice_bucket(self.train_demos)
+            self.eval_demos = _slice_bucket(self.eval_demos)
+
+        # ------------------------------------------------------------------
+        # Case 2: some requested metric missing -> recompute all requested
+        # ------------------------------------------------------------------
+        else:
+            print(
+                "⚠️ Requested metrics are not fully present in loaded demos. "
+                "Recomputing fairness_feats from scratch."
+            )
+
+            self.train_demos = [
+                _recompute_demo_fairness_feats(d, required_metrics)
+                for d in self.train_demos
+            ]
+            self.eval_demos = [
+                _recompute_demo_fairness_feats(d, required_metrics)
+                for d in self.eval_demos
+            ]
+
+        # ------------------------------------------------------------------
+        # Update metadata / cfg / cached demo feature arrays
+        # ------------------------------------------------------------------
+        if not hasattr(self, "meta") or self.meta is None:
+            self.meta = {}
+
+        self.meta["metrics"] = list(required_metrics)
+
+        if update_cfg:
+            self.cfg.demonstrator.metrics = list(required_metrics)
+            self.metrics = list(required_metrics)
+
+        # Recompute summary fairness dicts with the new metric set
+        self.fairness = {
+            "train": self._compute_fairness(self.train_demos),
+            "eval": self._compute_fairness(self.eval_demos),
+        }
+
+        if recompute_baselines:
+            self._compute_baseline_fairness_features()
+            self.meta["baseline_fairness_features"] = self.baseline_fairness_features
+
+        self._compute_standalone_demofeats()
+
+        return {
+            "train_demos": self.train_demos,
+            "eval_demos": self.eval_demos,
+            "metrics": required_metrics,
+            "metadata": self.meta,
+        }
 
     # -----------------------------------------------------------------
     # Saved sample loading
@@ -668,3 +849,265 @@ class Demonstrator:
             self.create_demos(resample=False, to_torch=self.to_torch_flag)
         else:
             print("✅ Cached demos match current config.")
+
+
+    # DIAGNOSTIC SET BUILDING
+    #===========================================================================================================
+
+    def _diagnostic_defaults(self):
+        dcfg = self.cfg.demonstrator
+        return {
+            "train_frac": float(getattr(dcfg, "diagnostic_train_frac", 0.5)),
+            "random_mult": float(getattr(dcfg, "diagnostic_random_mult", 0.5)),
+            "replace_train": bool(getattr(dcfg, "diagnostic_replace_train", False)),
+            "p_one": float(getattr(dcfg, "diagnostic_p_one", 0.5)),
+        }
+
+
+    def _build_demo_base_name(self):
+        cfg = self.cfg.demonstrator
+        demotype = getattr(cfg, "demotype", "partition")
+        if demotype == "fullset":
+            demotype = "lrdecisions"
+
+        extra = f"_type{demotype}"
+        if demotype == "lrdecisions":
+            n_models = getattr(cfg, "n_models", None)
+            subset_ratio = getattr(cfg, "subset_ratio", None)
+            subset_size = getattr(cfg, "subset_size", None)
+
+            if n_models is not None:
+                extra += f"_n{int(n_models)}"
+            if subset_ratio is not None:
+                extra += f"_sr{float(subset_ratio):.3g}"
+            if subset_size is not None:
+                extra += f"_ss{int(subset_size)}"
+
+        return (
+            f"{cfg.dataset}_demo{extra}"
+            f"_size{cfg.demo_size}"
+            f"_glob{cfg.compute_global}"
+            f"_norm{cfg.normalize}"
+            f"_sample{self.sample_id}"
+        )
+
+
+    def _build_diagnostic_name(
+        self,
+        split: str,
+        train_frac: float,
+        random_mult: float,
+        replace_train: bool,
+        p_one: float,
+    ):
+        base = self._build_demo_base_name()
+        return (
+            f"{base}"
+            f"_diag{split}"
+            f"_tf{train_frac:.3g}"
+            f"_rm{random_mult:.3g}"
+            f"_rt{replace_train}"
+            f"_p1{p_one:.3g}"
+        )
+
+
+    def _save_bundle(self, out: dict, np_path: Path, meta_path: Path):
+        save_format = getattr(self.cfg.demonstrator, "save_format", "separate")
+        meta_pure = to_pure(out["metadata"])
+
+        if save_format == "zip":
+            np.savez_compressed(np_path, **out)
+        else:
+            np.save(np_path, out)
+            safe_json_dump(meta_pure, meta_path)
+
+
+    def _load_bundle(self, np_path: Path, meta_path: Path):
+        save_format = getattr(self.cfg.demonstrator, "save_format", "separate")
+
+        if save_format == "zip":
+            out = np.load(np_path, allow_pickle=True)
+            return {
+                "train_demos": out["train_demos"].tolist() if "train_demos" in out else None,
+                "eval_demos": out["eval_demos"].tolist() if "eval_demos" in out else None,
+                "fairness": out["fairness"].tolist() if "fairness" in out else None,
+                "metadata": out["metadata"].tolist() if "metadata" in out else {},
+            }
+
+        out = np.load(np_path, allow_pickle=True).item()
+        if "metadata" not in out and meta_path.exists():
+            out["metadata"] = safe_json_load(meta_path)
+        return out
+
+
+    def _make_diagnostic_split(
+        self,
+        demos,
+        train_frac: float = 0.5,
+        random_mult: float = 0.5,
+        replace_train: bool = False,
+        p_one: float = 0.5,
+        seed: int | None = None,
+    ):
+        if not (0.0 <= train_frac <= 1.0):
+            raise ValueError("train_frac must be in [0,1]")
+        if not (0.0 <= random_mult <= 10.0):
+            raise ValueError("random_mult must be in [0,10]")
+        if demos is None or len(demos) == 0:
+            return []
+
+        rng = np.random.default_rng(seed)
+        n_total = len(demos)
+
+        n_keep = int(round(train_frac * n_total))
+        n_rand = int(round(random_mult * n_total))
+
+        if n_keep > 0:
+            chosen = rng.choice(n_total, size=n_keep, replace=replace_train)
+            real_demos = [demos[i] for i in chosen]
+        else:
+            real_demos = []
+
+        random_demos = []
+        for rid in range(n_rand):
+            src_id = int(rng.integers(0, n_total))
+            src = demos[src_id]
+
+            y_ref = src["y"]
+            X_ref = src["X"]
+            A_ref = src["A"]
+            idx_ref = src.get("indices", None)
+
+            y_demo = (rng.random(np.shape(y_ref)) < p_one).astype(np.float32)
+
+            fairness_feats = compute_fairness_features(
+                torch.as_tensor(y_ref, dtype=torch.float32),
+                torch.as_tensor(y_demo, dtype=torch.float32),
+                torch.as_tensor(A_ref, dtype=torch.float32),
+                metrics=self.cfg.demonstrator.metrics,
+                X=torch.as_tensor(X_ref, dtype=torch.float32),
+            ).detach().cpu().numpy()
+
+            random_demos.append({
+                "indices": idx_ref,
+                "X": X_ref,
+                "y": y_ref,
+                "A": A_ref,
+                "y_demo": y_demo,
+                "fairness_feats": fairness_feats,
+                "zero_one_loss": zero_one_loss(y_ref, y_demo),
+                "source_demo_id": src_id,
+                "random_demo_id": rid,
+                "is_random_demo": True,
+            })
+
+        for d in real_demos:
+            d.setdefault("is_random_demo", False)
+
+        mixed = real_demos + random_demos
+        rng.shuffle(mixed)
+        return mixed
+
+
+    def _load_or_create_diagnostic_split(self, base_demos, split: str):
+        params = self._diagnostic_defaults()
+
+        name = self._build_diagnostic_name(
+            split=split,
+            train_frac=params["train_frac"],
+            random_mult=params["random_mult"],
+            replace_train=params["replace_train"],
+            p_one=params["p_one"],
+        )
+
+        save_format = getattr(self.cfg.demonstrator, "save_format", "separate")
+        np_path = self.diagnostics_dir / (
+            f"{name}.npz" if save_format == "zip" else f"{name}.npy"
+        )
+        meta_path = self.diagnostics_dir / f"{name}_meta.json"
+
+        overwrite = bool(getattr(self.cfg.demonstrator, "overwrite", False))
+
+        if np_path.exists() and not overwrite:
+            print(f"📂 Loading cached diagnostic {split} demos from {np_path}")
+            out = self._load_bundle(np_path, meta_path)
+            demos = out["train_demos"] if split == "train" else out["eval_demos"]
+            if demos is not None:
+                return demos
+
+        seed_base = int(getattr(self.cfg, "seed", 0))
+        seed = seed_base if split == "train" else seed_base + 10000
+
+        diag_demos = self._make_diagnostic_split(
+            demos=base_demos,
+            train_frac=params["train_frac"],
+            random_mult=params["random_mult"],
+            replace_train=params["replace_train"],
+            p_one=params["p_one"],
+            seed=seed,
+        )
+
+        fairness = self._compute_fairness(diag_demos)
+        meta = {
+            **(self.meta if hasattr(self, "meta") and self.meta is not None else {}),
+            "is_diagnostic": True,
+            "diagnostic_split": split,
+            "diagnostic_train_frac": params["train_frac"],
+            "diagnostic_random_mult": params["random_mult"],
+            "diagnostic_replace_train": params["replace_train"],
+            "diagnostic_p_one": params["p_one"],
+            "n_base_demos": len(base_demos),
+            "n_diagnostic_demos": len(diag_demos),
+        }
+
+        out = {
+            "train_demos": diag_demos if split == "train" else None,
+            "eval_demos": diag_demos if split == "eval" else None,
+            "fairness": fairness,
+            "metadata": meta,
+        }
+        self._save_bundle(out, np_path, meta_path)
+        print(f"💾 Saved diagnostic {split} demos to {np_path}")
+        return diag_demos
+
+
+    def maybe_apply_diagnostics(self):
+        """
+        Post-processing step to be called after create_demos().
+        Replaces self.train_demos / self.eval_demos with diagnostic versions
+        only when the corresponding flags are enabled.
+        """
+        dcfg = self.cfg.demonstrator
+        use_train = bool(getattr(dcfg, "use_diagnostic_train", False))
+        use_eval = bool(getattr(dcfg, "use_diagnostic_eval", False))
+
+        if not use_train and not use_eval:
+            return {
+                "train_demos": self.train_demos,
+                "eval_demos": self.eval_demos,
+                "metadata": self.meta,
+            }
+
+        base_train = self.train_demos
+        base_eval = self.eval_demos
+
+        if use_train:
+            self.train_demos = self._load_or_create_diagnostic_split(base_train, split="train")
+
+        if use_eval:
+            self.eval_demos = self._load_or_create_diagnostic_split(base_eval, split="eval")
+
+        if hasattr(self, "meta") and self.meta is not None:
+            self.meta = {
+                **self.meta,
+                "use_diagnostic_train": use_train,
+                "use_diagnostic_eval": use_eval,
+                "n_demos_train": len(self.train_demos) if self.train_demos is not None else 0,
+                "n_demos_eval": len(self.eval_demos) if self.eval_demos is not None else 0,
+            }
+
+        return {
+            "train_demos": self.train_demos,
+            "eval_demos": self.eval_demos,
+            "metadata": self.meta,
+        }

@@ -474,8 +474,8 @@ def plot_dominance_counts(
     x_timesteps=None,       # list of epoch indices at which to draw per-mode bars
     palette=None,           # list of colors, one per mode
     annotate_per_mode: bool = False,
-    bar_width=12.35,
-    bar_alpha=0.65,
+    bar_width=10.35,
+    bar_alpha=0.45,
 ):
     """
     Plot dominant_rollouts and dominant_demos over epochs.
@@ -588,8 +588,10 @@ def plot_dominance_counts(
         if x < 0 or x >= len(per_mode_vals) or per_mode_vals[x] is None:
             continue
 
-        vals = np.asarray(per_mode_vals[x], dtype=float).reshape(-1)
-        if vals.size != n_modes:
+        vals = np.asarray(per_mode_vals[x], dtype=float)
+        if vals.shape[0] != n_modes:
+            import ipdb;ipdb.set_trace()
+
             raise ValueError(
                 f"Inconsistent per_mode size at timestep {x}: "
                 f"expected {n_modes}, got {vals.size}."
@@ -599,7 +601,7 @@ def plot_dominance_counts(
 
         # draw bottom → top so that mode 0 appears at the top
         for mode_idx in reversed(range(n_modes)):
-            h = vals[mode_idx]
+            h = vals[mode_idx].sum()
 
             ax.bar(
                 x,

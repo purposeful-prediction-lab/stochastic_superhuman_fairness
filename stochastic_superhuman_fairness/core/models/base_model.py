@@ -82,10 +82,10 @@ class BaseModel(ABC, nn.Module):
         kwargs propagate to the underlying method (batch size, shuffle, etc.)
         """
 
-        #  import ipdb;ipdb.set_trace()
         t_function= kwargs['t_function']
         tkwargs = {'batch_size':batch_size, 'alpha_updates': self.alpha_updates, **kwargs}
-        tkwargs = flatten_dict(tkwargs, keep_path = False)
+        #  import ipdb;ipdb.set_trace()
+        tkwargs = flatten_dict(tkwargs, keep_path = False, no_flatten_terms = ['loss_fn_kwargs'])
         return getattr(self, f'_train_one_epoch_{t_function}')(demonstrator, no_update = False, **tkwargs)
 
     # ----------------------------------------------------------
@@ -297,7 +297,8 @@ class BaseModel(ABC, nn.Module):
        return sample_actions_from_policy(self.policy, X, decision_threshold = decision_threshold,
                              return_logits=return_logits, return_probs=return_probs,require_grad=require_grad)
 
-    def evaluate(self, demonstrator, decision_threshold: float = 0.5):
+    def evaluate(self, demonstrator, decision_threshold: float = 0.5, per_policy_rollouts : int = 20,
+                    stochastic: bool = True):
         """
         Evaluate either a single policy (self.policy) or multiple policies (self.policies).
         Returns aggregate metrics + per-policy metrics under key "per_policy".
@@ -314,8 +315,9 @@ class BaseModel(ABC, nn.Module):
             }
 
         # ---- Precompute reference demo fairness (train demos) ----
+        demo_feats = demonstrator.eval_demo_feats
         f_train = torch.as_tensor(
-            np.stack([d["fairness_feats"] for d in demonstrator.train_demos]),
+            np.stack([d["fairness_feats"] for d in demonstrator.eval_demos]),
             dtype=torch.float32,
             device=self.device,
         )
@@ -327,8 +329,22 @@ class BaseModel(ABC, nn.Module):
 
         # ---- collect policies uniformly ----
         policies = self.get_policy()
-
+        #  import ipdb;ipdb.set_trace()
         with torch.no_grad():
+            #  rb = self.collect_eval_rollouts(
+            #                  demonstrator,
+            #                  demos=demonstrator.eval_demos,
+            #                  shared_x = demonstrator.shared_x,
+            #                  decision_threshold = decision_threshold,
+            #                  n_rollouts = per_policy_rollouts,
+            #                  stochastic=stochastic,
+            #                  use_demos_as_gtruth = False,
+            #                  )
+            #  rollout_feats = rb.feats.detach().cpu().numpy()
+            #  import ipdb;ipdb.set_trace()
+            #  probs = torch.stack(rb.y_hat) # (P x Per_rollout, N)
+             
+            #  feats = rb.feats
             # logits: (P, N)
             logits = torch.stack([p(Xe).squeeze(-1) for p in policies], dim=0)
             probs = torch.sigmoid(logits)                      # (P, N)
@@ -348,7 +364,8 @@ class BaseModel(ABC, nn.Module):
             # subdominance per policy vs train demos
             subdom_out = subdominance_loss_from_features(
                 rollout_feats=f_eval,
-                demo_feats=f_train,
+                #  demo_feats=f_train,
+                demo_feats=demo_feats,
                 mode=self.subdom_mode,
                 agg=self.subdom_agg,
                 alpha=self.alpha,

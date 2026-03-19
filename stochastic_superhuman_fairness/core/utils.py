@@ -175,7 +175,7 @@ def ns_to_dict(obj):
 
     return obj
 
-def flatten_dict(d, parent_key="", sep=".", keep_path=True):
+def flatten_dict(d, parent_key="", sep=".", keep_path=True, no_flatten_terms: list = []):
     """
     Flatten a nested dictionary.
 
@@ -189,11 +189,14 @@ def flatten_dict(d, parent_key="", sep=".", keep_path=True):
     items = {}
     for k, v in d.items():
         key = str(k)
+        if key in no_flatten_terms:
+            items[key] = v
+            continue
         if keep_path and parent_key:
             key = f"{parent_key}{sep}{k}"
 
         if isinstance(v, dict) or isinstance(v, SimpleNamespace):
-            items.update(flatten_dict(v, key if keep_path else "", sep=sep, keep_path=keep_path))
+            items.update(flatten_dict(v, key if keep_path else "", sep=sep, keep_path=keep_path, no_flatten_terms = no_flatten_terms))
         else:
             items[key] = v
     return items

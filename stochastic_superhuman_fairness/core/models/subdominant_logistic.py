@@ -12,6 +12,8 @@ from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdo
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_directional_cost
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
         subdominant_logloss_shared_X_multi_rollout,  # the [R,N] logits version, reference
+        subdominant_weighted_logloss_shared_X_multi_rollout,  # the [R,N] logits version, reference
+        compute_subdominance_matrix,
         compute_subdominance_matrix,
         )
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features, compute_fairness_features_batched, compute_fairness_features_batched_fast
@@ -128,6 +130,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         alpha_updates: str = "analytical",
         no_update: bool = False,
         use_demos_as_gtruth: bool = False,
+        loss_fn: str = None,
+        loss_fn_kwargs: dict = {},
         **kwargs,
     ):
         '''This function assumes shared x among demos.'''
@@ -267,20 +271,32 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             <= torch.as_tensor(S, device=device).float()
         ).float()
         loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
-                          'per_mode_dominant_rollouts': indicator.sum(axis=1).tolist(),
-                          'per_mode_dominant_demos': indicator_rev.sum(axis=1).tolist(),
+                          'per_mode_dominant_rollouts': indicator.sum(axis=1).reshape(P, n_rollouts).tolist(),
+                          'per_mode_dominant_demos': indicator_rev.sum(axis=1).reshape(P, n_rollouts).tolist(),
                           }
         #  import ipdb;ipdb.set_trace()
         # ----------------------------------------------------
         # 5) Loss + GD step
         # ----------------------------------------------------
-        loss_out = subdominant_logloss_shared_X_multi_rollout(
-            logits_rollouts=logits_rollouts,  # [R,N]
-            yhat_rollouts=yhat_rollouts,      # [R,N]
-            y_demo=y_demo,                    # [D,N]
-            gamma=gamma,                      # [R,D]
-            indicator_win=indicator,          # [R,D]
-        )
+        if loss_fn == 'weighted':
+            loss_out = subdominant_weighted_logloss_shared_X_multi_rollout(
+                    S,
+                    torch.tensor(S_rev_ji).to(S.device),
+                    logits_rollouts,  # [R,N]
+                    yhat_rollouts,    # [R,N]
+                    y_demo,           # [D,N]
+                    gamma,            # [R,D]
+                    indicator,        # [R,D]
+                    **loss_fn_kwargs,
+                )
+        else:
+            loss_out = subdominant_logloss_shared_X_multi_rollout(
+                logits_rollouts=logits_rollouts,  # [R,N]
+                yhat_rollouts=yhat_rollouts,      # [R,N]
+                y_demo=y_demo,                    # [D,N]
+                gamma=gamma,                      # [R,D]
+                indicator_win=indicator,          # [R,D]
+            )
 
         if not no_update:
             self.optimizer.zero_grad(set_to_none=True)
@@ -309,6 +325,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     "train/P": int(P),
                     "train/D": int(D),
                     "train/l_terms": loss_term_dict,
+                    "gamma_matrix": gamma,
                 }
 
 
