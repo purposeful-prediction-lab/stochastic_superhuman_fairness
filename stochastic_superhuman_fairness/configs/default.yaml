@@ -110,11 +110,11 @@ learner:
         col_constraints: #'rev_ranking' # Options : None(uniform), rev_ranking
         ot_temperature: 1.0
         gamma_temperature: 1.0
-        normalize_s_matrix: True
+        normalize_s_matrix: False
         renormalize_gamma: True
         loss_fn: 'weighted'
         loss_fn_kwargs: #for nested  dict be sure to include them into no_flatten_terms in line 88 base_model.py
-          term_weights: [0., 1.]
+          term_weights: [1., 1.]
       bayesian:
         n_rollouts: 256
         dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn

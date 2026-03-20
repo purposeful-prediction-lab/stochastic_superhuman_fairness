@@ -648,6 +648,9 @@ class Demonstrator:
                 for k in ["X", "y", "A"]:
                     d[k] = torch.as_tensor(d[k], dtype=torch.float32, device=device)
         return batch_demos
+
+    # --------------------------------------------------------------------------------
+
     def keep_only_requested_fairness_metrics(
         self,
         required_metrics=None,

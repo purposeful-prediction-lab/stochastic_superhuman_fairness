@@ -363,8 +363,8 @@ def _solve_sinkhorn_core(
     # ---- kernel ----
 
     #  import ipdb;ipdb.set_trace()
-    S_shift = S - S.min()
-    #  S_shift = 1- S_shift
+    #  S_shift = S - S.min()
+    S_shift = S 
     K = np.exp(-S_shift / max(epsilon, 1e-12)) + 1e-300
 
     u = np.ones(num_samples) / num_samples

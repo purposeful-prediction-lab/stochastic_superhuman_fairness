@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 def plot_loss_and_subdom(
     logs,
     *,
+    ax = None,
     title="Training Curves",
     xlabel="Epoch",
     loss_label="Loss",
@@ -43,7 +44,13 @@ def plot_loss_and_subdom(
     # -----------------------------
     # Create figure
     # -----------------------------
-    fig, ax1 = plt.subplots(figsize=figsize)
+    if ax is None:
+        fig, ax1 = plt.subplots(1, 1, figsize=figsize)
+    else:
+        ax1 = ax
+        fig = ax1.figure
+
+    #  fig, ax1 = plt.subplots(figsize=figsize)
 
     # ----- Loss (left axis)
     ax1.plot(epochs, loss, color=loss_color, label=loss_label)

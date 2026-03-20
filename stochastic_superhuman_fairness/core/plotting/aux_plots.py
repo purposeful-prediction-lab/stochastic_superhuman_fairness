@@ -645,44 +645,70 @@ def plot_dominance_counts(
         )
     fig.tight_layout()
     return fig, ax
-#  def plot_dominance_counts(logs, *, title="Dominance counts per epoch", figsize=(8, 4)):
-#      """
-#      Plot dominant_rollouts and dominant_demos over epochs.
-#
-#      Parameters
-#      ----------
-#      logs : list[dict]
-#          Output of load_metrics_jsonl(log_dir), one dict per epoch.
-#          Expected structure:
-#              log["loss_term_dict"]["dominant_rollouts"]
-#              log["loss_term_dict"]["dominant_demos"]
-#
-#      Returns
-#      -------
-#      fig, ax
-#      """
-#      dom_rollouts = []
-#      dom_demos = []
-#      epochs = []
-#
-#      for i, log in enumerate(logs):
-#          ltd = log.get("train/l_terms", {})
-#          if "dominant_rollouts" not in ltd or "dominant_demos" not in ltd:
-#              continue
-#          epochs.append(i)
-#          dom_demos.append(ltd["dominant_demos"])
-#          dom_rollouts.append(ltd["dominant_rollouts"])
-#
-#      if not epochs:
-#          raise ValueError("No log entries with loss_term_dict dominant counts were found.")
-#
-#      fig, ax = plt.subplots(1, 1, figsize=figsize)
-#      ax.plot(epochs, dom_demos, label="dominant_demos")
-#      ax.plot(epochs, dom_rollouts, label="dominant_rollouts")
-#
-#      ax.set_xlabel("epoch")
-#      ax.set_ylabel("count")
-#      ax.set_title(title)
-#      ax.legend()
-#      fig.tight_layout()
-#      return fig, ax
+
+def plot_paired_subdominance_curve(
+    logs,
+    *,
+    ax = None,
+    title="Paired Subdominance Curve",
+    figsize=(9, 4),
+):
+    """
+    Plot, over epochs:
+      - S_mean
+      - norm_paired_subdom
+      - ratio = norm_paired_subdom / S_mean   (on right y-axis)
+
+    Expects each log entry to contain:
+      log["S_mean"]
+      log["norm_paired_subdom"]
+
+    Returns
+    -------
+    fig, (ax_left, ax_right)
+    """
+    epochs, s_mean, norm_paired, ratio = [], [], [], []
+
+    for i, log in enumerate(logs):
+        ltd = log.get("train/l_terms", {})
+        if "S_mean" not in ltd or "norm_paired_subdom" not in ltd:
+            continue
+        s = float(ltd["S_mean"])
+        n = float(ltd["norm_paired_subdom"])
+        epochs.append(i)
+        s_mean.append(s)
+        norm_paired.append(n)
+        ratio.append(n / s if abs(s) > 1e-12 else np.nan)
+    if not epochs:
+        raise ValueError("No log entries with 'S_mean' and 'norm_paired_subdom' were found.")
+
+    epochs = np.asarray(epochs)
+    s_mean = np.asarray(s_mean)
+    norm_paired = np.asarray(norm_paired)
+    ratio = np.asarray(ratio)
+    if ax is None:
+        fig, ax_left = plt.subplots(1, 1, figsize=figsize)
+    else:
+        ax_left = ax
+        fig = ax.figure
+
+    ax_right = ax_left.twinx()
+    l1 = ax_left.plot(epochs, s_mean, label="S_mean")
+    l2 = ax_left.plot(epochs, norm_paired, label="norm_paired_subdom")
+    l3 = ax_right.plot(epochs, ratio, color = 'red', linestyle="--", label="norm_paired_subdom / S_mean")
+
+    ax_left.set_xlabel("epoch")
+    ax_left.set_ylabel("value")
+    ax_right.set_ylabel("ratio")
+    ax_left.tick_params(axis="y", labelcolor='blue')
+    ax_right.tick_params(axis="y", labelcolor='red')
+
+
+    ax_left.set_title(title)
+
+    lines = l1 + l2 + l3
+    labels = [ln.get_label() for ln in lines]
+    ax_left.legend(lines, labels)
+
+    fig.tight_layout()
+    return fig, (ax_left, ax_right)

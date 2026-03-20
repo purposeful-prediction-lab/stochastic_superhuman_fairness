@@ -158,14 +158,16 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
     term2 = (w_lose_ij * bce_pair).sum()
 
     loss = term_weights[0] * term1 + term_weights[1] * term2
-    #  import ipdb;ipdb.set_trace()
     #  loss = term2
+    #  import ipdb;ipdb.set_trace()
     info = {
         "w_win_sum": float(w_win_i.sum().detach().cpu()),
         "w_lose_sum": float(w_lose_ij.sum().detach().cpu()),
         "indicator_mean": float(I.mean().detach().cpu()),
         "term1": float(term1.detach().cpu()),
         "term2": float(term2.detach().cpu()),
+        'S_mean': S.mean().detach().cpu().item(),
+        "norm_paired_subdom":  ((gamma * S).sum()/gamma.sum()).detach().cpu().item(),
     }
     return SubdomLossOut(loss=loss, info=info)
 # ---------------------------------------------------------------------------------
@@ -345,7 +347,6 @@ def compute_subdominance_matrix(
         # (K,) -> (1,1,K)
         if p.ndim == 1:
             if p.shape[0] != K:
-                import ipdb;ipdb.set_trace()
                 raise ValueError(f"{name} must be scalar, (K,), or (R,K). Got {p.shape}.")
             return p.reshape(1, 1, K)
 

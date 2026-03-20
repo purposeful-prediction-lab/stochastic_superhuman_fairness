@@ -270,11 +270,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             torch.as_tensor(S_rev_ji, device=device).float()
             <= torch.as_tensor(S, device=device).float()
         ).float()
-        loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
-                          'per_mode_dominant_rollouts': indicator.sum(axis=1).reshape(P, n_rollouts).tolist(),
-                          'per_mode_dominant_demos': indicator_rev.sum(axis=1).reshape(P, n_rollouts).tolist(),
-                          }
-        #  import ipdb;ipdb.set_trace()
         # ----------------------------------------------------
         # 5) Loss + GD step
         # ----------------------------------------------------
@@ -297,6 +292,12 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                 gamma=gamma,                      # [R,D]
                 indicator_win=indicator,          # [R,D]
             )
+        #  import ipdb;ipdb.set_trace()
+        loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
+                          'per_mode_dominant_rollouts': indicator.sum(axis=1).reshape(P, n_rollouts).tolist(),
+                          'per_mode_dominant_demos': indicator_rev.sum(axis=1).reshape(P, n_rollouts).tolist(),
+                          'S_mean': loss_out.info['S_mean'],'norm_paired_subdom': loss_out.info['norm_paired_subdom']
+                          }
 
         if not no_update:
             self.optimizer.zero_grad(set_to_none=True)

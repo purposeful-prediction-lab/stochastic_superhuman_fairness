@@ -13,6 +13,7 @@ from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_an
 from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
 from stochastic_superhuman_fairness.core.plotting.plotting_palettes import MODE_PALETTE_100_PAPERSAFE, MODE_PALETTE_100_MAXVAR
 from stochastic_superhuman_fairness.core.plotting.aux_plots import (
+        plot_paired_subdominance_curve,
         plot_subdominance_heatmap, plot_optimal_transport_solution,
         plot_ot_solution_heatmaps, plot_indicator_matrix,
         plot_dominance_counts,
@@ -286,7 +287,12 @@ def main():
     # =====================================================================================
     log_dir = os.path.join(os.path.dirname(os.path.abspath(args.archive)), '..', 'metrics_log.jsonl')
     logs = load_metrics_jsonl(log_dir)
-    fig, _ = plot_loss_and_subdom(logs)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, ax = plot_loss_and_subdom(logs,ax=axes[0])
+    #  try:
+    fig, ax = plot_paired_subdominance_curve(logs, ax = axes[1])
+    #  except:
+        #  print('Not paired subdominance')
     # Save
     out_path = os.path.join(save_dir, "losses.png")
     print(f'Saving losses.png to {out_path}')
