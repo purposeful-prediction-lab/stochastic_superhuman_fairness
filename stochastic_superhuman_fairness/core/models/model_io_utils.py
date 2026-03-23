@@ -192,6 +192,7 @@ def validate_schedule(schedule, *, cfg, device, default_learner_cfg=None):
 # ---------------------------------------------------------------------
 def load_model_from_archive(
     archive_path: str,
+    demonstrator: Demonstrator = None,
     device: str = "cpu",
     phase_idx: int = 0,
     strict: bool = False,
@@ -239,8 +240,11 @@ def load_model_from_archive(
     # -------------------------------------------------
     # Build demonstrator
     # -------------------------------------------------
-    cfg_dict['demonstrator']['overwrite'] = overwrite_demos
-    demo = Demonstrator(cfg_dict)
+    if demonstrator is None:
+        cfg_dict['demonstrator']['overwrite'] = overwrite_demos
+        demo = Demonstrator(cfg_dict)
+    else:
+        demo = demonstrator
 
     # Attach global fields (mirrors learner behavior)
     if hasattr(cfg_dict, "metrics"):
@@ -268,3 +272,4 @@ def load_model_from_archive(
         model.load_dist_state(dist_state, device=device)
 
     return model, cfg_dict, demo
+

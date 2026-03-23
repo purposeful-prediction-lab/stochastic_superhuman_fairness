@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import math
 import torch
 
+from matplotlib.gridspec import GridSpecFromSubplotSpec
 from stochastic_superhuman_fairness.core.plotting.plotting_palettes import (
         MODE_PALETTE_100_PAPERSAFE, BASELINE_PALETTE, MODE_PALETTE_100_MAXVAR,
         )
@@ -18,6 +19,46 @@ def _to_np(x):
         return x.detach().cpu().numpy()
     return np.asarray(x)
 
+#  Subgroup block plot helpers
+#  Plotting subplot groups in figure subplot axes
+def make_inner_axes(parent_ax, n_subplots, figsize_per_ax=(4.0, 3.5)):
+    """
+    Replace one parent axis with a grid of internal subplots.
+    Returns flat list of axes.
+    """
+    fig = parent_ax.figure
+    subspec = parent_ax.get_subplotspec()
+    parent_ax.remove()
+
+    ncols = int(math.ceil(math.sqrt(n_subplots)))
+    nrows = int(math.ceil(n_subplots / ncols))
+
+    gs = GridSpecFromSubplotSpec(
+        nrows, ncols,
+        subplot_spec=subspec,
+        wspace=0.3,
+        hspace=0.3,
+    )
+
+    axes = [fig.add_subplot(gs[i, j]) for i in range(nrows) for j in range(ncols)]
+    return np.array(axes, dtype=object)
+
+def set_block_title(fig, axes, title):
+    xs = [ax.get_position().x0 for ax in axes]
+    xe = [ax.get_position().x1 for ax in axes]
+    ys = [ax.get_position().y1 for ax in axes]
+
+    x_center = (min(xs) + max(xe)) / 2
+    y_top = max(ys)
+
+    fig.text(
+        x_center, y_top + 0.02,
+        title,
+        ha="center",
+        va="bottom",
+        fontsize=12,
+        fontweight="bold",
+    )
 #--------------------------------------------------------------
 
 def normalize_rollout_modes(rollout_feats):
@@ -377,6 +418,7 @@ def plot_zero_one_vs_features(
     rollout_feats,                  # (R,K) or (M,R,K) or list of (r_m,K); last dim is zero_one
     demo_feats,                     # (D,K) where last entry is zero_one
     *,
+    ax = None,
     feature_names=None,             # length K-1
     baselines=None,                 # {name: array(K,)} optional, last entry is zero_one
     title="Zero-one vs Features",
@@ -423,12 +465,21 @@ def plot_zero_one_vs_features(
     ncols = int(math.ceil(math.sqrt(n)))
     nrows = int(math.ceil(n / ncols))
 
-    fig, axes = plt.subplots(
-        nrows, ncols,
-        figsize=(figsize_per_ax[0] * ncols, figsize_per_ax[1] * nrows),
-        squeeze=False,
-    )
-    axes = axes.ravel()
+    if ax is None:
+        fig, axes = plt.subplots(
+            nrows, ncols,
+            figsize=(figsize_per_ax[0] * ncols, figsize_per_ax[1] * nrows),
+            squeeze=False,
+        )
+        axes = axes.ravel()
+    else:
+        fig = ax.figure
+
+        # if a single parent axis was passed, subdivide it
+        if hasattr(ax, "get_subplotspec"):
+            axes = make_inner_axes(ax, K_feat, figsize_per_ax=figsize_per_ax)
+        else:
+            axes = np.asarray(ax).ravel()    
 
     # paper-friendly, avoid red/blue/orange (use your palette; red reserved for rollout mean)
     mode_colors = cycle_palette_colors(M, mode_palette_MAXVAR) if mode_colors is None else mode_colors
@@ -723,8 +774,9 @@ def plot_zero_one_vs_features_subplots(
 
     if title is None:
         title = "Zero-one loss vs features"
-
-    fig.suptitle(title)
+    if ax is not None:
+        set_block_title(fig, axes, title)
+    #  fig.suptitle(title)
     fig.tight_layout()
 
     return (fig, axes, artists) if return_artists else (fig, axes)

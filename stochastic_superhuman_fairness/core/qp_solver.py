@@ -174,10 +174,10 @@ def _solve_qp_mosek_core(
     rollout_marginals: np.ndarray | list = None,
     demo_marginals: np.ndarray | list = None,
     lambda_reg: float | None = None,
-    normalize_subdom: bool = True,
+    normalize_subdom: bool = False,
     tau: float = 1.0,
     verbose: bool = True,
-    row_constraints: bool = True,
+    row_constraints: bool = False,
     col_constraints: bool = True,
 ):
     """
@@ -199,9 +199,11 @@ def _solve_qp_mosek_core(
         S = S * tau
     if lambda_reg is None:
         lambda_reg = 1e-6
+    #  import ipdb;ipdb.set_trace()
     # Reduce lampbda in unconstrained cases
-    if not (row_constraints or col_constraints):
-        lambda_reg = 1e-9
+    if not (row_constraints and col_constraints):
+        lambda_reg = 0.0
+        #  lambda_reg = 1e-12
 
     if verbose:
         print(f"[MOSEK] Solving QP with λ={lambda_reg:.1e}, τ={tau}, "
@@ -221,8 +223,8 @@ def _solve_qp_mosek_core(
 
     # --- MOSEK setup ---
     with mosek.Env() as env, env.Task(0, 0) as task:
-
         task.putobjsense(mosek.objsense.minimize)
+        #  task.putintparam(mosek.iparam.optimizer, mosek.optimizertype.primal_simplex)
         task.putdouparam(mosek.dparam.intpnt_co_tol_rel_gap, 1e-8)
 
         # Variables γ_ij ≥ 0

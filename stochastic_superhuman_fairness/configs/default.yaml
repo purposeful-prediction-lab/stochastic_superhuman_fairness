@@ -68,13 +68,13 @@ learner:
       train_print_freq: 100
       model_cfg:
         # policy_sources: ['random', 'logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
-        policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
-        # policy_sources: ['logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
+        # policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
+        policy_sources: ['logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
         # policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl', 'logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
         # policy_sources: ['random']
         policy_mixture: [1.]
         n_models: 2
-        init_noise_std: 0.4
+        init_noise_std: 0.1
       train:
         lr: 0.001
         batch_size: 100
@@ -106,12 +106,12 @@ learner:
       optimizer: 'adam' # adam, sgd
       stochastic:
         solver: 'sinkhorn'
-        row_constraints: True         # Bool
+        row_constraints: False         # Bool
         col_constraints: #'rev_ranking' # Options : None(uniform), rev_ranking
         ot_temperature: 1.0
         gamma_temperature: 1.0
         normalize_s_matrix: False
-        renormalize_gamma: True
+        renormalize_gamma: False
         loss_fn: 'weighted'
         loss_fn_kwargs: #for nested  dict be sure to include them into no_flatten_terms in line 88 base_model.py
           term_weights: [1., 1.]

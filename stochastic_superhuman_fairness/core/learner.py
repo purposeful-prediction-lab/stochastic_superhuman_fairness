@@ -65,6 +65,7 @@ class Learner:
     # ----------------------------------------------------------
     def run(self):
         """Execute the full training schedule."""
+
         for phase_idx, phase_cfg in enumerate(self.schedule):
             scfg = getattr(self.cfg, 'subdominance', {})
             algo = phase_cfg["algo"]
@@ -79,6 +80,8 @@ class Learner:
 
             # Initialize or switch model
             self.switch_algo(algo, phase_cfg)
+            if phase_idx == 0:
+                self.logger.save_checkpoint(self.model, 00, 'init_model', cfg=self.cfg)
             # Log model transition
             self.logger.log_transition(phase_idx, algo)
 

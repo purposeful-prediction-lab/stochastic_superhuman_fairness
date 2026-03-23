@@ -2,6 +2,22 @@ import json
 from pathlib import Path
 from omegaconf import ListConfig, DictConfig, OmegaConf
 
+def classify_arg(arg: str):
+    p = Path(arg)
+
+    if p.is_absolute():
+        return "absolute_path"
+    elif p.parent != Path("."):
+        return "relative_path"
+    else:
+        return "name"
+
+def get_base_path(path_str: str) -> str:
+    return str(Path(path_str).parent)
+
+def split_path(path_str: str):
+    p = Path(path_str)
+    return str(p.parent), p.name
 
 def to_pure(obj):
     """Recursively convert OmegaConf containers (DictConfig, ListConfig) into native Python types."""

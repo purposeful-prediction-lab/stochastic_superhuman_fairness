@@ -261,11 +261,17 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
 
         S_rev_ji = self.apply_S_temperature(S_demo_roll.T, beta=ot_temperature)  # [R,D]
 
-        indicator = (
+        win_indicator = (
             torch.as_tensor(S, device=device).float()
             <= torch.as_tensor(S_rev_ji, device=device).float()
         ).float()
-
+        #  S0_indicator = S == 0
+        #  S0_indicator = S <= 0.1
+        #  indicator = torch.logical_and(S0_indicator, win_indicator).float()
+        #  indicator = (S == 0.0).float()
+        indicator = (S <= S.mean()).float()
+        #  indicator = (S <= 0.2).float()
+        #  import ipdb;ipdb.set_trace()
         indicator_rev = (
             torch.as_tensor(S_rev_ji, device=device).float()
             <= torch.as_tensor(S, device=device).float()
@@ -292,7 +298,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                 gamma=gamma,                      # [R,D]
                 indicator_win=indicator,          # [R,D]
             )
-        #  import ipdb;ipdb.set_trace()
         loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
                           'per_mode_dominant_rollouts': indicator.sum(axis=1).reshape(P, n_rollouts).tolist(),
                           'per_mode_dominant_demos': indicator_rev.sum(axis=1).reshape(P, n_rollouts).tolist(),

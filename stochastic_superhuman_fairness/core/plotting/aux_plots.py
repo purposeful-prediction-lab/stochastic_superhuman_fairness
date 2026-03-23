@@ -7,6 +7,7 @@ from stochastic_superhuman_fairness.core.plotting.plot_utils import  _add_row_gr
 def plot_subdominance_heatmap(
     S,
     *,
+    ax = None,
     rollout_labels=None,
     demo_labels=None,
     title="Subdominance heatmap",
@@ -60,7 +61,13 @@ def plot_subdominance_heatmap(
         raise ValueError("normalize must be 'none', 'log', 'zscore', or 'minmax'.")
 
     # ---- plotting ----
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        ax = ax
+        fig = ax.figure
+
+
     im = ax.imshow(A_plot, aspect="auto")
 
     ax.set_title(title)
@@ -104,6 +111,7 @@ def plot_subdominance_heatmap(
 def plot_ot_solution_heatmaps(
     sol: dict,
     *,
+    ax = None,
     mode: str = "replicate",
     title="Optimal transport (heatmaps)",
     gamma_normalize="none",
@@ -162,78 +170,83 @@ def plot_ot_solution_heatmaps(
     mode = mode.lower()
     if mode not in {"replicate", "sum"}:
         raise ValueError("mode must be 'replicate' or 'sum'.")
+    if ax is None:
+        fig, axes = plt.subplots(1, 1, figsize=figsize)
+    else:
+        axes = ax
+        fig = ax.figure
 
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    #  fig, axes = plt.subplots(1, 3, figsize=figsize)
 
     # 1) gamma
-    im0 = axes[0].imshow(Gp, aspect="auto")
+    im0 = axes.imshow(Gp, aspect="auto")
     _add_row_group_colors_to_heatmap(
-        axes[0],
+        axes,
         R,
         row_groups=row_groups,
         group_colors=group_colors,
         strip_width=group_strip_width,
     )
-    axes[0].set_title(r"$\gamma$")
-    axes[0].set_xlabel("demos")
-    axes[0].set_ylabel("rollouts")
-    if show_colorbar: fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+    axes.set_title(r"$\gamma$")
+    axes.set_xlabel("demos")
+    axes.set_ylabel("rollouts")
+    if show_colorbar: fig.colorbar(im0, ax=axes, fraction=0.046, pad=0.04)
 
-    if mode == "replicate":
-        U = np.repeat(u[:, None], D, axis=1)   # (R,D)
-        V = np.repeat(v[None, :], R, axis=0)   # (R,D)
-
-        im1 = axes[1].imshow(U, aspect="auto")
-        _add_row_group_colors_to_heatmap(
-            axes[1], R,
-            row_groups=row_groups,
-            group_colors=group_colors,
-            strip_width=group_strip_width,
-        ) 
-        axes[1].set_title("dual_rows (replicated)")
-        axes[1].set_xlabel("demos")
-        axes[1].set_ylabel("rollouts")
-        if show_colorbar: fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-        im2 = axes[2].imshow(V, aspect="auto")
-        _add_row_group_colors_to_heatmap(
-            axes[2], R,
-            row_groups=row_groups,
-            group_colors=group_colors,
-            strip_width=group_strip_width,
-        )
-        axes[2].set_title("dual_cols (replicated)")
-        axes[2].set_xlabel("demos")
-        axes[2].set_ylabel("rollouts")
-        if show_colorbar: fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-
-    else:  # mode == "sum"
-        UV = u[:, None] + v[None, :]           # (R,D)
-        im1 = axes[1].imshow(UV, aspect="auto")
-        _add_row_group_colors_to_heatmap(
-            axes[1], R,
-            row_groups=row_groups,
-            group_colors=group_colors,
-            strip_width=group_strip_width,
-        )
-        axes[1].set_title("dual potential (u + v)")
-        axes[1].set_xlabel("demos")
-        axes[1].set_ylabel("rollouts")
-        if show_colorbar: fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-        # keep 3 panels: show also separate sign structure via centered version
-        UVc = UV - UV.mean()
-        im2 = axes[2].imshow(UVc, aspect="auto")
-        _add_row_group_colors_to_heatmap(
-            axes[2], R,
-            row_groups=row_groups,
-            group_colors=group_colors,
-            strip_width=group_strip_width,
-        )
-        axes[2].set_title("(u + v) centered")
-        axes[2].set_xlabel("demos")
-        axes[2].set_ylabel("rollouts")
-        if show_colorbar: fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    #  if mode == "replicate":
+    #      U = np.repeat(u[:, None], D, axis=1)   # (R,D)
+    #      V = np.repeat(v[None, :], R, axis=0)   # (R,D)
+    #
+    #      im1 = axes[1].imshow(U, aspect="auto")
+    #      _add_row_group_colors_to_heatmap(
+    #          axes[1], R,
+    #          row_groups=row_groups,
+    #          group_colors=group_colors,
+    #          strip_width=group_strip_width,
+    #      )
+    #      axes[1].set_title("dual_rows (replicated)")
+    #      axes[1].set_xlabel("demos")
+    #      axes[1].set_ylabel("rollouts")
+    #      if show_colorbar: fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    #
+    #      im2 = axes[2].imshow(V, aspect="auto")
+    #      _add_row_group_colors_to_heatmap(
+    #          axes[2], R,
+    #          row_groups=row_groups,
+    #          group_colors=group_colors,
+    #          strip_width=group_strip_width,
+    #      )
+    #      axes[2].set_title("dual_cols (replicated)")
+    #      axes[2].set_xlabel("demos")
+    #      axes[2].set_ylabel("rollouts")
+    #      if show_colorbar: fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    #
+    #  else:  # mode == "sum"
+    #      UV = u[:, None] + v[None, :]           # (R,D)
+    #      im1 = axes[1].imshow(UV, aspect="auto")
+    #      _add_row_group_colors_to_heatmap(
+    #          axes[1], R,
+    #          row_groups=row_groups,
+    #          group_colors=group_colors,
+    #          strip_width=group_strip_width,
+    #      )
+    #      axes[1].set_title("dual potential (u + v)")
+    #      axes[1].set_xlabel("demos")
+    #      axes[1].set_ylabel("rollouts")
+    #      if show_colorbar: fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    #
+    #      # keep 3 panels: show also separate sign structure via centered version
+    #      UVc = UV - UV.mean()
+    #      im2 = axes[2].imshow(UVc, aspect="auto")
+    #      _add_row_group_colors_to_heatmap(
+    #          axes[2], R,
+    #          row_groups=row_groups,
+    #          group_colors=group_colors,
+    #          strip_width=group_strip_width,
+    #      )
+    #      axes[2].set_title("(u + v) centered")
+    #      axes[2].set_xlabel("demos")
+    #      axes[2].set_ylabel("rollouts")
+    #      if show_colorbar: fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -367,6 +380,7 @@ def plot_optimal_transport_solution(
 def plot_indicator_matrix(
     M,
     *,
+    ax = None,
     row_labels=None,
     col_labels=None,
     title="Indicator Matrix",
@@ -392,7 +406,12 @@ def plot_indicator_matrix(
 
     R, C = M.shape
 
-    fig, ax = plt.subplots(figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        ax = ax
+        fig = ax.figure
+
     im = ax.imshow(M, cmap=cmap, aspect="auto", vmin=0, vmax=1)
 
     _add_row_group_colors_to_heatmap(
