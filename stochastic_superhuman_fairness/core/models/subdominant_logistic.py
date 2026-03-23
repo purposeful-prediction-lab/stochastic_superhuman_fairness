@@ -269,8 +269,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         #  S0_indicator = S <= 0.1
         #  indicator = torch.logical_and(S0_indicator, win_indicator).float()
         #  indicator = (S == 0.0).float()
-        indicator = (S <= S.mean()).float()
-        #  indicator = (S <= 0.2).float()
+        #  indicator = (S <= S.mean()).float()
+        indicator = (S <= 0.2).float()
         #  import ipdb;ipdb.set_trace()
         indicator_rev = (
             torch.as_tensor(S_rev_ji, device=device).float()

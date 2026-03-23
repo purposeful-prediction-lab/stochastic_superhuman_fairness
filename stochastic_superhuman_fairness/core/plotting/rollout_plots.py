@@ -556,8 +556,11 @@ def plot_zero_one_vs_features(
         if ax.has_data():
             ax.legend()
             break
-
-    fig.suptitle(title)
+    if axes is not None and len(axes) > 0:
+            axes[0].set_title(title, loc="center", fontsize=12, fontweight="bold")
+    #  if ax is not None:
+    #      set_block_title(fig, axes, title)
+    #  fig.suptitle(title)
     fig.tight_layout()
     return fig, axes
 # -----------------------------------------------------------------------------------------------
@@ -774,9 +777,7 @@ def plot_zero_one_vs_features_subplots(
 
     if title is None:
         title = "Zero-one loss vs features"
-    if ax is not None:
-        set_block_title(fig, axes, title)
-    #  fig.suptitle(title)
+    fig.suptitle(title)
     fig.tight_layout()
 
     return (fig, axes, artists) if return_artists else (fig, axes)
