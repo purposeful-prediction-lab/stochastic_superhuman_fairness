@@ -2,8 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import math
 import torch
+from typing import Union
 
+from matplotlib import cm, colors as mcolors
+from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+
 from stochastic_superhuman_fairness.core.plotting.plotting_palettes import (
         MODE_PALETTE_100_PAPERSAFE, BASELINE_PALETTE, MODE_PALETTE_100_MAXVAR,
         )
@@ -13,12 +18,13 @@ from stochastic_superhuman_fairness.core.plotting.plot_utils import (
     inv_alpha_for_dims,
     annotate_inverse_alpha_arrows,
     cycle_palette_colors,
+    _plot_mixed_text_points,
+    _plot_text_points,
+    _validate_demo_labels,
+    _validate_rollout_mode_labels,
+    _apply_limits_from_data,
+    _to_np,
 )
-def _to_np(x):
-    if torch.is_tensor(x):
-        return x.detach().cpu().numpy()
-    return np.asarray(x)
-
 #  Subgroup block plot helpers
 #  Plotting subplot groups in figure subplot axes
 def make_inner_axes(parent_ax, n_subplots, figsize_per_ax=(4.0, 3.5)):
@@ -270,7 +276,6 @@ def aggregate_mean_xy_over_modes(modes, x_idx, y_idx):
     return float(xs.mean()), float(ys.mean())
 
 
-
 # =====================================================================================================================
 # Plotting Functions
 # =====================================================================================================================
@@ -300,7 +305,6 @@ def plot_rollouts_vs_demos_pairs(
     Xm = normalize_rollout_modes(rollout_feats)  # (M,R,K)
     all_means = aggregate_feature_mean(rollout_feats)
 
-    #  import ipdb;ipdb.set_trace()
     M, K = infer_modes_and_dim(Xm)
     D = _as_demos(demo_feats, K)
     baselines_list = _parse_baselines(baselines, K)
@@ -424,6 +428,13 @@ def plot_zero_one_vs_features(
     title="Zero-one vs Features",
     start_offset=None,              # e.g. -0.05
     mode_colors: list = None,
+    plot_demos_as_text=False,
+    plot_rollouts_as_text=False,
+    demo_text_labels=None,          # e.g. demo ranks
+    demo_colors = None,
+    rollout_text_labels=None,       # e.g. [[1,2,3], [4,5,6], ...] or custom strings
+    fontsize_demos=8,
+    fontsize_rollouts=8,
     s_rollouts=10,
     s_demos=18,
     s_means=40,
@@ -484,42 +495,86 @@ def plot_zero_one_vs_features(
     # paper-friendly, avoid red/blue/orange (use your palette; red reserved for rollout mean)
     mode_colors = cycle_palette_colors(M, mode_palette_MAXVAR) if mode_colors is None else mode_colors
 
+    # validate labels
+    demo_text_labels = _validate_demo_labels(demo_text_labels, len(D))
+    rollout_text_labels = _validate_rollout_mode_labels(rollout_text_labels, modes)
+
     for k in range(K_feat):
         ax = axes[k]
 
-        # rollouts per mode (same color as mode mean)
+        # ---------------- rollouts ----------------
         for m, Xm in enumerate(modes):
-            ax.scatter(
-                Xm[:, k], Xm[:, y_idx],
-                s=s_rollouts,
-                alpha=alpha_rollouts,
-                marker="o",
-                color=mode_colors[m % len(mode_colors)],
-                label="rollouts" if m == 0 else None,
-                zorder=1,
-            )
-            # mode mean (same color)
+            color_m = mode_colors[m % len(mode_colors)]
+
+            if plot_rollouts_as_text:
+                labels_m = rollout_text_labels[m] if rollout_text_labels is not None else range(len(Xm))
+                _plot_text_points(
+                    ax,
+                    Xm[:, k], Xm[:, y_idx],
+                    labels_m,
+                    color=color_m,
+                    alpha=alpha_rollouts,
+                    fontsize=fontsize_rollouts,
+                    zorder=1,
+                )
+            else:
+                ax.scatter(
+                    Xm[:, k], Xm[:, y_idx],
+                    s=s_rollouts,
+                    alpha=alpha_rollouts,
+                    marker="o",
+                    color=color_m,
+                    label="rollouts" if m == 0 else None,
+                    zorder=1,
+                )
+
+            # keep mode mean as marker
             mx = float(Xm[:, k].mean())
             my = float(Xm[:, y_idx].mean())
             ax.scatter(
                 mx, my,
-                s=s_means/1.5,
+                s=s_means / 1.5,
                 marker="D",
                 alpha=1.0,
-                color=mode_colors[m % len(mode_colors)],
-                #  label=f"mode_{m}_mean" if len(modes) > 1 else None,
+                color=color_m,
                 zorder=4,
             )
 
-        # demos
-        ax.scatter(
-            D[:, k], D[:, y_idx],
-            s=s_demos,
-            alpha=alpha_demos,
-            marker="x",
-            label="demos",
-            zorder=2,
-        )
+        # ---------------- demos ----------------
+        if plot_demos_as_text:
+            labels_d = demo_text_labels if demo_text_labels is not None else range(len(D))
+            #  labels_d = demo_text_labels if demo_text_labels is not None else [None] * len(D)
+            _plot_mixed_text_points(
+                ax,
+                D[:, k], D[:, y_idx],
+                labels_d,
+                colors = demo_colors,
+                alpha_text=alpha_demos,
+                alpha_marker=alpha_demos,
+                fontsize=fontsize_demos,
+                marker="x",
+                s=s_demos,
+                zorder_text=3,
+                zorder_marker=2,
+            )
+            #  _plot_text_points(
+            #      ax,
+            #      D[:, k], D[:, y_idx],
+            #      labels_d,
+            #      color="black",
+            #      alpha=alpha_demos,
+            #      fontsize=fontsize_demos,
+            #      zorder=2,
+            #  )
+        else:
+            ax.scatter(
+                D[:, k], D[:, y_idx],
+                s=s_demos,
+                alpha=alpha_demos,
+                marker="x",
+                label="demos",
+                zorder=2,
+            )
 
         # overall means
         mx_r, my_r = aggregate_mean_xy_over_modes(modes, k, y_idx)
@@ -543,8 +598,16 @@ def plot_zero_one_vs_features(
         ax.grid(True, alpha=0.2)
 
         # limits + optional offset, then origin axes
-        ax.relim()
-        ax.autoscale()
+        all_x = np.concatenate([D[:, k]] + [Xm[:, k] for Xm in modes])
+        all_y = np.concatenate([D[:, y_idx]] + [Xm[:, y_idx] for Xm in modes])
+
+        pad_x = 0.05 * (all_x.max() - all_x.min() + 1e-12)
+        pad_y = 0.05 * (all_y.max() - all_y.min() + 1e-12)
+
+        ax.set_xlim(all_x.min() - pad_x, all_x.max() + pad_x)
+        ax.set_ylim(-0.05, all_y.max() + pad_y)
+        #  ax.relim()
+        #  ax.autoscale_view()
         set_axis_with_offset(ax, start_offset)
         draw_origin_axes(ax, origin=(0.0, 0.0))
 
@@ -564,222 +627,751 @@ def plot_zero_one_vs_features(
     fig.tight_layout()
     return fig, axes
 # -----------------------------------------------------------------------------------------------
+def _annotate_sidebar_direction(ax, *, best_to_worst=True, x=1.02, top_label = 'best', bot_label = 'worst'):
+    """
+    Annotate meaning of top->bottom next to the subplot.
+    x is in ax.transAxes coordinates, so >1 puts it to the right of the axis.
+    """
 
-def plot_zero_one_vs_features_subplots(
-    rb,
-    demos,
+    # text
+    ax.text(
+        x, 1.02, top_label,
+        transform=ax.transAxes,
+        ha="left", va="bottom",
+        fontsize=5.5,
+    )
+    ax.text(
+        x, -0.02, bot_label,
+        transform=ax.transAxes,
+        ha="left", va="top",
+        fontsize=5.5,
+    )
+
+    # arrow from top to bottom
+    ax.annotate(
+        "",
+        xy=(x + 0.04, 0.01),
+        xytext=(x + 0.04, 0.98),
+        xycoords=ax.transAxes,
+        textcoords=ax.transAxes,
+        arrowprops=dict(arrowstyle="->", lw=0.8),
+        annotation_clip=False,
+    )
+def _resolve_optional_labels(labels, n, name="labels"):
+    if labels is None:
+        return [None] * n
+    if len(labels) != n:
+        raise ValueError(f"{name} must have length {n}, got {len(labels)}.")
+    return list(labels)
+
+
+def _normalize_gamma_to_mode_list(gamma, modes, D):
+    """
+    Returns gamma_by_mode = list of arrays, each (r_m, D).
+    Accepts:
+      - gamma shape (sum_r_m, D)
+      - list/tuple of arrays each (r_m, D)
+    """
+    if isinstance(gamma, (list, tuple)):
+        gamma_by_mode = [np.asarray(gm) for gm in gamma]
+        if len(gamma_by_mode) != len(modes):
+            raise ValueError(
+                f"gamma list must have one matrix per mode: expected {len(modes)}, got {len(gamma_by_mode)}."
+            )
+        for m, (gm, Xm) in enumerate(zip(gamma_by_mode, modes)):
+            if gm.shape != (len(Xm), D):
+                raise ValueError(
+                    f"gamma[{m}] must have shape {(len(Xm), D)}, got {gm.shape}."
+                )
+        return gamma_by_mode
+
+    G = np.asarray(gamma)
+    total_r = sum(len(Xm) for Xm in modes)
+    if G.shape != (total_r, D):
+        raise ValueError(f"gamma must have shape {(total_r, D)}, got {G.shape}.")
+
+    gamma_by_mode = []
+    start = 0
+    for Xm in modes:
+        r = len(Xm)
+        gamma_by_mode.append(G[start:start + r])
+        start += r
+    return gamma_by_mode
+
+def _add_demo_coupling_sidebar(ax, coupl, cmap_obj, norm):
+        import numpy as np
+        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+        cax = inset_axes(
+            ax,
+            width="3%",
+            height="100%",
+            loc="lower left",
+            bbox_to_anchor=(1.01, 0.0, 1, 1),
+            bbox_transform=ax.transAxes,
+            borderpad=0,
+        )
+
+        img = np.asarray(coupl).reshape(-1, 1)
+        cax.imshow(img, aspect="auto", cmap=cmap_obj, norm=norm, origin="upper")
+
+        # --- ticks: min / mid / max ---
+        n = len(coupl)
+        idx_min = int(np.argmin(coupl))
+        idx_max = int(np.argmax(coupl))
+        idx_mid = n // 2
+
+        val_min = float(coupl[idx_min])
+        val_max = float(coupl[idx_max])
+        val_mid = float(np.median(coupl))  # better than center index
+
+        cax.set_yticks([idx_max, idx_mid, idx_min])
+        cax.set_yticklabels([
+            f"{val_max:.2g}",
+            f"{val_mid:.2g}",
+            f"{val_min:.2g}",
+        ], fontsize=7)
+
+        cax.set_xticks([])
+
+        # subtle styling
+        for spine in cax.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(0.5)
+
+        return cax
+
+def plot_zero_one_vs_features_mode_coupling(
+    rollout_feats,
+    demo_feats,
+    gamma,
     *,
+    ax=None,                           # None, single axis if K_feat==1, or list/array of K_feat axes
     feature_names=None,
-    alpha=None,
-    baseline_fairness=None,
-    title=None,
-    rollout_label="rollouts",
-    demo_label="demos",
-    s_rollouts=12,
-    s_demos=28,
-    s_baselines=90,
-    marker_rollouts="o",
-    marker_demos="x",
-    marker_baselines="X",
-    baseline_alpha=1.0,
-    figsize_per_ax=(4.0, 3.5),
-    return_artists: bool = False,
+    title="Zero-one vs Features by Mode Coupling",
+    start_offset=None,
+    mode_colors=None,
+    cmap="viridis",
+    coupling_norm="global",
+    rollout_text_labels=None,          # list per mode: [[..., None, ...], ...]
+    demo_text_labels=None,             # length D, entries can be None
+    annotate_sidebar=True,             # True or [top_label, bot_label]
+    fontsize_rollouts=8,
+    fontsize_demos=8,
+    s_rollouts=16,
+    s_demos=22,
+    s_means=40,
+    alpha_rollouts=0.35,
+    alpha_demos=0.95,
+    figsize_per_ax=(4.1, 3.6),
+    default_demo_color="#1f77b4",
+    default_rollout_marker="o",
+    default_demo_marker="x",
 ):
-    def _to_np(x):
-        if torch.is_tensor(x):
-            return x.detach().cpu().numpy()
-        return np.asarray(x)
+    """
+    Correct behavior:
+      - zero_one is always feats[:, -1]
+      - one subplot per feature_k for k in [0, ..., K-2]
+      - each mode gets its own group of K-1 plots
 
-    # ----- rollouts -----
-    Rall = _to_np(rb.feats)
-    R, K = Rall.shape
+    If ax is None:
+      creates an (M x K_feat) grid
+
+    If ax is provided:
+      - if M == 1:
+          ax may be:
+            * a single matplotlib axis if K_feat == 1
+            * a list/array of K_feat axes
+      - otherwise:
+          ax should be a 2D array-like of shape (M, K_feat)
+    """
+
+    modes = normalize_rollout_modes(rollout_feats)
+    M = len(modes)
+    K = modes[0].shape[1]
     K_feat = K - 1
+    y_idx = K - 1
 
-    Xr = Rall[:, :K_feat]
-    yr = Rall[:, K_feat]
-    # Compute rollout mean once per call
-    #  rollout_mean = compute_feature_means(rollouts)  # [K]
-    #  demo_mean    = compute_feature_means(demos)     # [K]   # NEW
-    # ----- alphas ------
-    alpha_x = None   # (K_feat,)
-    alpha_y = None   # scalar for zero-one
+    Df = _to_np(demo_feats)
+    if Df.ndim != 2 or Df.shape[1] != K:
+        raise ValueError(f"demo_feats must have shape (D, {K}), got {Df.shape}")
+    D = len(Df)
 
-    if alpha is not None:
-        a = alpha.detach().cpu().numpy() if torch.is_tensor(alpha) else np.asarray(alpha, dtype=float)
-
-        if a.ndim == 0:  # scalar -> repeat for all features + zero-one
-            a = np.full((K_feat + 1,), float(a), dtype=float)
-        else:
-            a = a.reshape(-1)
-
-    alpha_x = a[:K_feat]
-    alpha_y = float(a[K_feat])
-    # ----- demos -----
-    Xd_list, yd_list = [], []
-    for d in demos:
-        ff = _to_np(d["fairness_feats"]).reshape(-1)
-        Xd_list.append(ff[:K_feat])
-        yd_list.append(float(ff[K_feat]))
-
-    Xd = np.stack(Xd_list) if len(Xd_list) else np.zeros((0, K_feat))
-    yd = np.asarray(yd_list) if len(yd_list) else np.zeros((0,))
-
-    # ----- baselines -----
-    baselines = []
-    if baseline_fairness is not None:
-        for name, v in baseline_fairness.items():
-            b = _to_np(v).reshape(-1)
-            baselines.append((name, b[:K_feat], float(b[K_feat])))
-
-    # ----- feature names -----
     if feature_names is None:
         feature_names = [f"f{i}" for i in range(K_feat)]
 
-    roll_alpha = 0.35 if alpha is None else float(np.asarray(alpha).reshape(()))
+    if mode_colors is None:
+        mode_colors = [f"C{i}" for i in range(M)]
+    mode_colors = cycle_palette_colors(M, mode_palette_MAXVAR) if mode_colors is None else mode_colors
 
-    # ----- layout -----
-    ncols = int(math.ceil(math.sqrt(K_feat)))
-    nrows = int(math.ceil(K_feat / ncols))
-    fig, axes = plt.subplots(
-        nrows, ncols,
-        figsize=(figsize_per_ax[0] * ncols, figsize_per_ax[1] * nrows),
-        squeeze=False,
+    rollout_text_labels = (
+        [[None] * len(Xm) for Xm in modes]
+        if rollout_text_labels is None else rollout_text_labels
     )
-    axes_flat = axes.ravel()
-
-    artists = [] if return_artists else None
-
-    for k in range(K_feat):
-        ax = axes_flat[k]
-
-        sc_d = ax.scatter(Xd[:, k], yd,
-                          s=s_demos, marker=marker_demos,
-                          alpha=1.0, label=demo_label, zorder=2)
-        sc_r = ax.scatter(Xr[:, k], yr,
-                          s=s_rollouts, marker=marker_rollouts,
-                          alpha=roll_alpha, label=rollout_label, zorder=1)
-
-        # baselines
-        sc_b_list = []
-        
-        c = 0
-        for name, bf, bz in baselines:
-            marker_char = f"${name[0].upper()}$"
-
-            sc_b = ax.scatter(
-                bf[k],
-                bz,
-                s=s_baselines,
-                marker=marker_char,
-                alpha=baseline_alpha,
-                label=name,
-                zorder=4,
-                color = BASELINE_PALETTE[c]
+    if len(rollout_text_labels) != M:
+        raise ValueError(f"rollout_text_labels must have {M} lists")
+    for m, (labs, Xm) in enumerate(zip(rollout_text_labels, modes)):
+        if len(labs) != len(Xm):
+            raise ValueError(
+                f"rollout_text_labels[{m}] must have length {len(Xm)}, got {len(labs)}"
             )
-            c += 1
-            sc_b_list.append(sc_b)
-        # ----- means -----
-        mx_r = float(np.mean(Xr[:, k]))
-        my_r = float(np.mean(yr))
 
-        if len(Xd) > 0:
-            mx_d = float(np.mean(Xd[:, k]))
-            my_d = float(np.mean(yd))
+    demo_text_labels = _resolve_optional_labels(demo_text_labels, D, "demo_text_labels")
+    gamma_by_mode = _normalize_gamma_to_mode_list(gamma, modes, D)
+    demo_coupling_means = np.stack([gm.mean(axis=0) for gm in gamma_by_mode], axis=0)
+
+    if coupling_norm not in {"per_mode", "global"}:
+        raise ValueError("coupling_norm must be 'per_mode' or 'global'")
+
+    cmap_obj = cm.get_cmap(cmap)
+
+    if coupling_norm == "global":
+        all_gamma_vals = np.concatenate([gm.ravel() for gm in gamma_by_mode])
+        gvmin = float(all_gamma_vals.min())
+        gvmax = float(all_gamma_vals.max())
+        if gvmax <= gvmin:
+            gvmax = gvmin + 1e-12
+        global_norm = mcolors.Normalize(vmin=gvmin, vmax=gvmax)
+
+    # -------- layout / axes normalization --------
+    created_fig = False
+
+    if ax is None:
+        fig, axes = plt.subplots(
+            M, K_feat,
+            figsize=(figsize_per_ax[0] * K_feat * 1.12, figsize_per_ax[1] * M),
+            squeeze=False,
+        )
+        created_fig = True
+    else:
+        fig = plt.gcf()
+
+        if M == 1:
+            if K_feat == 1:
+                if isinstance(ax, np.ndarray):
+                    axes = np.asarray(ax, dtype=object).reshape(1, 1)
+                elif isinstance(ax, (list, tuple)):
+                    if len(ax) != 1:
+                        raise ValueError("For M=1, K_feat=1, ax must be a single axis or length-1 list.")
+                    axes = np.asarray(ax, dtype=object).reshape(1, 1)
+                else:
+                    axes = np.asarray([[ax]], dtype=object)
+            else:
+                if not isinstance(ax, (list, tuple, np.ndarray)):
+                    raise ValueError(f"For M=1 and K_feat={K_feat}, ax must be a list/array of {K_feat} axes.")
+                axes = np.asarray(ax, dtype=object).reshape(1, K_feat)
         else:
-            mx_d, my_d = None, None
+            if not isinstance(ax, (list, tuple, np.ndarray)):
+                raise ValueError(f"For M={M}, ax must be a 2D array-like of shape ({M}, {K_feat}).")
+            axes = np.asarray(ax, dtype=object).reshape(M, K_feat)
 
-        # rollout mean (RED)
-        mean_r = ax.scatter(mx_r, my_r,
-                            s=90, color="red", marker="o",
-                            label="mean_rollouts", zorder=5)
+        if axes.shape != (M, K_feat):
+            raise ValueError(f"ax must have shape ({M}, {K_feat}), got {axes.shape}")
 
-        # demo mean (CYAN)
-        if mx_d is not None:
-            mean_d = ax.scatter(mx_d, my_d,
-                                s=90, color="cyan", marker="o",
-                                label="mean_demos", zorder=5)
+    # legend handles
+    demo_mean_handle = Line2D(
+        [0], [0],
+        marker="*",
+        linestyle="None",
+        markersize=max(4, np.sqrt(s_means)),
+        markerfacecolor="cyan",
+        markeredgecolor="cyan",
+        label="Demo mean",
+    )
+
+    out_axes = []
+
+    # -------- plotting --------
+    for m, Xm in enumerate(modes):
+        coupl = demo_coupling_means[m]
+
+        if coupling_norm == "global":
+            norm = global_norm
         else:
-            mean_d = None
+            vmin = float(coupl.min())
+            vmax = float(coupl.max())
+            if vmax <= vmin:
+                vmax = vmin + 1e-12
+            norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
 
-        # ----- guide lines from rollout mean -----
-        ax.relim()
-        ax.autoscale()
+        demo_colors = [cmap_obj(norm(v)) for v in coupl]
+        rcolor = mode_colors[m]
 
-        ax.set_xlim(left=-0.05)
-        ax.set_ylim(bottom=-0.05)
+        rollout_mean_handle = Line2D(
+            [0], [0],
+            marker="D",
+            linestyle="None",
+            markersize=max(4, np.sqrt(s_means)),
+            markerfacecolor=rcolor,
+            markeredgecolor=rcolor,
+            label="Mode mean",
+        )
 
-        xmin, xmax = ax.get_xlim()
-        ymin, ymax = ax.get_ylim()
+        for k in range(K_feat):
+            axk = axes[m, k]
 
-        ax.plot([mx_r, xmax], [my_r, my_r], lw=1.5, zorder=3, color = 'red')
-        ax.plot([mx_r, mx_r], [my_r, ymax], lw=1.5, zorder=3, color = 'red')
-        # Origin solid black lines
-        ax.hlines(0, 0, xmax, color = 'black')
-        ax.vlines(0, 0, ymax, color = 'black')
-
-        # --- alpha guide lines: x = 1/alpha_k, y = 1/alpha_zeroone ---
-        if alpha_x is not None:
-            x_alpha = 1.0 / max(1e-12, float(alpha_x[k]))
-            ax.axvline(x_alpha, linestyle="--", linewidth=1.5, color="red", zorder=3)
-
-            # double dashed arrow from rollout-mean vertical (x=mx_r) to x_alpha line
-            xmin, xmax = ax.get_xlim()
-            ymin, ymax = ax.get_ylim()
-            y_span = max(1e-12, ymax - ymin)
-            dy = 0.04 * y_span
-            y_arrow = my_r + dy
-
-            ax.annotate(
-                "",
-                xy=(x_alpha, y_arrow),
-                xytext=(mx_r, y_arrow),
-                arrowprops=dict(arrowstyle="<->", linestyle="--", color="lightgray", lw=1.4),
-                zorder=6,
-                clip_on=False,
+            # rollouts: x = feature_k, y = zero_one
+            _plot_mixed_text_points(
+                axk,
+                Xm[:, k], Xm[:, y_idx],
+                rollout_text_labels[m],
+                colors=[rcolor] * len(Xm),
+                default_color=rcolor,
+                alpha_text=alpha_rollouts,
+                alpha_marker=alpha_rollouts,
+                fontsize=fontsize_rollouts,
+                marker=default_rollout_marker,
+                s=s_rollouts,
+                zorder_text=5,
+                zorder_marker=2,
             )
-            ax.annotate(
-                f"alpha_{feature_names[k]}",
-                xy=((mx_r + x_alpha) / 2, y_arrow),
-                xytext=(0, 6),
-                textcoords="offset points",
+
+            # demos: x = feature_k, y = zero_one
+            _plot_mixed_text_points(
+                axk,
+                Df[:, k], Df[:, y_idx],
+                demo_text_labels,
+                colors=demo_colors,
+                default_color=default_demo_color,
+                alpha_text=alpha_demos,
+                alpha_marker=alpha_demos,
+                fontsize=fontsize_demos,
+                marker=default_demo_marker,
+                s=s_demos,
+                zorder_text=6,
+                zorder_marker=3,
+            )
+
+            # means for this feature_k vs zero_one
+            rx = float(Xm[:, k].mean())
+            ry = float(Xm[:, y_idx].mean())
+            dx = float(Df[:, k].mean())
+            dy = float(Df[:, y_idx].mean())
+
+            axk.scatter(rx, ry, s=s_means, marker="D", color=rcolor, zorder=8)
+            axk.scatter(dx, dy, s=s_means, marker="*", color="cyan", zorder=8)
+
+            # titles
+            #  axk.set_title(
+            #      feature_names[k],
+            #      loc="center",
+            #      color=rcolor,
+            #      fontweight="bold",
+            #      fontsize=11,
+            #  )
+            #  axk.text(
+            #      0.5, 0.992,
+            #      f"\nmean γ ∈ [{coupl.min():.3g}, {coupl.max():.3g}]",
+            #      transform=axk.transAxes,
+            #      ha="center",
+            #      va="bottom",
+            #      fontsize=6,
+            #      color=rcolor,
+            #  )
+
+            axk.set_xlabel(feature_names[k])
+            if k == 0:
+                axk.set_ylabel("zero_one")
+
+            _apply_limits_from_data(
+                axk,
+                x_arrays=[Xm[:, k], Df[:, k]],
+                y_arrays=[Xm[:, y_idx], Df[:, y_idx]],
+                pad_frac=0.05,
+                start_offset=start_offset,
+            )
+
+            axk.grid(True, alpha=0.2)
+            axk.axhline(0.0, color="0.7", lw=0.8, zorder=0)
+            axk.axvline(0.0, color="0.7", lw=0.8, zorder=0)
+
+            _add_demo_coupling_sidebar(axk, coupl, cmap_obj, norm)
+
+            if annotate_sidebar is True or isinstance(annotate_sidebar, list):
+                if annotate_sidebar is True:
+                    top_label, bot_label = "best", "worst"
+                else:
+                    top_label, bot_label = annotate_sidebar[0], annotate_sidebar[1]
+                _annotate_sidebar_direction(axk, top_label=top_label, bot_label=bot_label)
+
+            axk.legend(
+                handles=[rollout_mean_handle, demo_mean_handle],
+                loc="best",
+                fontsize=8,
+                frameon=True,
+            )
+
+            out_axes.append(axk)
+
+    # optional row labels if we created the figure
+    if created_fig and M > 1:
+        for m in range(M):
+            left = axes[m, 0].get_position().x0
+            right = axes[m, -1].get_position().x1
+            top = max(axes[m, k].get_position().y1 for k in range(K_feat))
+            fig.text(
+                0.5 * (left + right),
+                top + 0.01,
+                f"Mode {m}",
                 ha="center",
                 va="bottom",
-                fontsize=9,
-                color="gray",
-                zorder=7,
-                clip_on=False,
+                fontsize=12,
+                fontweight="bold",
+                color=mode_colors[m],
             )
 
-            # y = 1/alpha_zeroone (same across subplots)
-            y_alpha = 1.0 / max(1e-12, float(alpha_y))
-            ax.axhline(y_alpha, linestyle="--", linewidth=1.5, color="red", zorder=3)
-        ax.set_xlabel(feature_names[k])
-        ax.set_ylabel("zero_one_loss")
-        ax.grid(True, alpha=0.2)
+    if created_fig and title is not None:
+        fig.suptitle(title, y=0.995)
+        fig.tight_layout()
 
-        if return_artists:
-            artists.append({
-                "k": k,
-                "rollouts": sc_r,
-                "demos": sc_d,
-                "baselines": sc_b_list,
-                "mean_rollouts": mean_r,
-                "mean_demos": mean_d,
-            })
+    return fig, axes
 
-    for ax in axes_flat[K_feat:]:
-        ax.axis("off")
 
-    for ax in axes_flat:
-        if ax.has_data():
-            ax.legend()
-            break
+def plot_zero_one_vs_features_demo_logprobs(
+    rollout_feats,
+    demo_feats,
+    logs,
+    *,
+    ax=None,                         # None or array-like of shape (M, K-1)
+    feature_names=None,
+    logprob_key="demo_logprobs",     # inside log["train/l_terms"]
+    title="Zero-one vs Features colored by demo logprob",
+    mode_colors=None,
+    cmap="viridis",
+    logprob_norm="global",         # "per_mode" or "global"
+    rollout_text_labels=None,        # list per mode
+    demo_text_labels=None,           # len D
+    fontsize_rollouts=8,
+    fontsize_demos=8,
+    s_rollouts=14,
+    s_means=60,
+    alpha_rollouts=0.35,
+    alpha_demos=0.95,
+    figsize_per_ax=(4.4, 3.6),
+    default_rollout_marker="o",
+    default_demo_marker="x",
+    size_bin_min=20,
+    size_bin_max=120,
+    n_size_bins=10,
+):
+    """
+    For each mode m and feature k in [0, ..., K-2], plot:
+        x = feature_k
+        y = zero_one = feats[:, -1]
 
-    if title is None:
-        title = "Zero-one loss vs features"
-    fig.suptitle(title)
-    fig.tight_layout()
+    Demos are colored and sized by the demo logprob under that mode.
 
-    return (fig, axes, artists) if return_artists else (fig, axes)
-# -----------------------------------------------------------------------------------------------
+    Expected log format:
+        logs[i]["train/l_terms"][logprob_key] -> shape (M, D)
+    We use the LAST available entry.
 
+    Returns
+    -------
+    fig, axes, demo_logprobs_norm
+        axes has shape (M, K-1)
+        demo_logprobs_norm has shape (M, D)
+    """
+
+    # ---------- extract last demo_logprobs ----------
+    last_demo_logprobs = None
+    for log in logs:
+        ltd = log.get("train/l_terms", {})
+        if logprob_key in ltd:
+            last_demo_logprobs = ltd[logprob_key]
+
+    if last_demo_logprobs is None:
+        raise ValueError(f"Could not find train/l_terms['{logprob_key}'] in logs.")
+
+    demo_logprobs = _to_np(last_demo_logprobs)
+    if demo_logprobs.ndim == 1:
+        demo_logprobs = demo_logprobs[None, :]
+    if demo_logprobs.ndim != 2:
+        raise ValueError(f"{logprob_key} must be 2D (M, D), got shape {demo_logprobs.shape}")
+
+    # ---------- normalize inputs ----------
+    modes = normalize_rollout_modes(rollout_feats)
+    M = len(modes)
+    K = modes[0].shape[1]
+    K_feat = K - 1
+    y_idx = K - 1
+
+    Df = _to_np(demo_feats)
+    if Df.ndim != 2 or Df.shape[1] != K:
+        raise ValueError(f"demo_feats must have shape (D, {K}), got {Df.shape}")
+    D = len(Df)
+
+    if demo_logprobs.shape != (M, D):
+        raise ValueError(
+            f"{logprob_key} must have shape ({M}, {D}) to match modes x demos, "
+            f"got {demo_logprobs.shape}"
+        )
+
+    if feature_names is None:
+        feature_names = [f"f{i}" for i in range(K_feat)]
+
+
+    mode_colors = cycle_palette_colors(M, mode_palette_MAXVAR) if mode_colors is None else mode_colors
+    if len(mode_colors) <= M:
+        raise ValueError(f"mode_colors must have length at least {M}")
+
+    rollout_text_labels = (
+        [[None] * len(Xm) for Xm in modes]
+        if rollout_text_labels is None else rollout_text_labels
+    )
+    if len(rollout_text_labels) != M:
+        raise ValueError(f"rollout_text_labels must have {M} lists")
+    for m, (labs, Xm) in enumerate(zip(rollout_text_labels, modes)):
+        if len(labs) != len(Xm):
+            raise ValueError(
+                f"rollout_text_labels[{m}] must have length {len(Xm)}, got {len(labs)}"
+            )
+
+    demo_text_labels = _resolve_optional_labels(demo_text_labels, D, "demo_text_labels")
+
+    # ---------- normalize logprobs to [0, 1] ----------
+    if logprob_norm == "global":
+        #  lo = float(demo_logprobs.min())
+        #  hi = float(demo_logprobs.max())
+        #  if hi <= lo:
+        #      hi = lo + 1e-12
+        #  demo_logprobs_norm = (demo_logprobs - lo) / (hi - lo)
+        #  lo, hi = np.percentile(demo_logprobs, [2, 98])
+        #  p_clipped = np.clip(demo_logprobs, lo, hi)
+        #  demo_logprobs_norm = (p_clipped - lo) / (hi - lo)
+        demo_logprobs_norm = demo_logprobs / demo_logprobs.max()
+        norm = mcolors.Normalize(vmin=demo_logprobs_norm.min(), vmax=demo_logprobs_norm.max())
+    elif logprob_norm == "per_mode":
+        lo = demo_logprobs.min(axis=1, keepdims=True)
+        hi = demo_logprobs.max(axis=1, keepdims=True)
+        hi = np.where(hi <= lo, lo + 1e-12, hi)
+        demo_logprobs_norm = (demo_logprobs - lo) / (hi - lo)
+        norm = None
+    else:
+        raise ValueError("logprob_norm must be 'per_mode' or 'global'")
+
+    cmap_obj = cm.get_cmap(cmap)
+
+    # ---------- 10 size bins ----------
+    bin_edges = np.linspace(0.0, 1.0, n_size_bins + 1)
+    size_levels = np.linspace(size_bin_min, size_bin_max, n_size_bins)
+
+    def _sizes_from_probs(p):
+        # p in [0, 1]
+        idx = np.digitize(p, bin_edges[1:-1], right=False)   # 0..n_size_bins-1
+        return size_levels[idx]
+
+    # ---------- axes ----------
+    created_fig = False
+
+    if ax is None:
+        fig, axes = plt.subplots(
+            M, K_feat,
+            figsize=(figsize_per_ax[0] * K_feat, figsize_per_ax[1] * M),
+            squeeze=False,
+        )
+        created_fig = True
+    else:
+        fig = plt.gcf()
+        axes = np.asarray(ax, dtype=object)
+        if M == 1 and K_feat == 1 and axes.ndim == 0:
+            axes = axes.reshape(1, 1)
+        elif M == 1:
+            axes = axes.reshape(1, K_feat)
+        else:
+            axes = axes.reshape(M, K_feat)
+
+        if axes.shape != (M, K_feat):
+            raise ValueError(f"ax must have shape ({M}, {K_feat}), got {axes.shape}")
+
+    out_axes = []
+    demo_mean_handle = Line2D(
+        [0], [0],
+        marker="*",
+        linestyle="None",
+        markersize=max(6, np.sqrt(s_means)),
+        markerfacecolor="cyan",
+        markeredgecolor="cyan",
+        label="Demo mean",
+    )
+    # SOrt demo by confidence to plot brither colors on top
+    #  order = np.argsort(demo_logprobs_norm)   # low -> high
+    #
+    #  x_ord = [order]
+    #  y_ord = y[order]
+    #  c_ord = [norm[i] for i in order]
+    #  s_ord = demo_sizes[order]
+    #  lab_ord = [demo_text_labels[i] for i in order]
+    # ---------- plotting ----------
+    for m, Xm in enumerate(modes):
+        #  import ipdb;ipdb.set_trace()
+        rcolor = mode_colors[m]
+        p_raw = demo_logprobs[m]          # (D,)
+        p_norm = demo_logprobs_norm[m]    # (D,)
+        mean_lp = float(p_raw.mean())
+        std_lp = float(p_raw.std())
+
+        if logprob_norm == "global":
+            #  demo_colors = [cmap_obj(norm(v)) for v in p_raw]
+            demo_colors = [cmap_obj(v) for v in p_norm]
+        else:
+            demo_colors = [cmap_obj(v) for v in p_norm]
+
+        demo_sizes = _sizes_from_probs(p_norm)
+        rollout_mean_handle = Line2D(
+            [0], [0],
+            marker="D",
+            linestyle="None",
+            markersize=max(6, np.sqrt(s_means)),
+            markerfacecolor=rcolor,
+            markeredgecolor=rcolor,
+            label=f"Mode {m} mean \nDemo norm logprobs μ={p_raw.mean():.2g}, σ={p_raw.std():.2g}",
+        )
+        for k in range(K_feat):
+            axk = axes[m, k]
+
+            # rollouts for this mode
+            _plot_mixed_text_points(
+                axk,
+                Xm[:, k], Xm[:, k],
+                rollout_text_labels[m],
+                colors=[rcolor] * len(Xm),
+                default_color=rcolor,
+                alpha_text=alpha_rollouts,
+                alpha_marker=alpha_rollouts,
+                fontsize=fontsize_rollouts,
+                marker=default_rollout_marker,
+                s=s_rollouts,
+                zorder_text=4,
+                zorder_marker=2,
+            )
+            
+            # demos: do size-aware mixed plotting manually
+            #  for xd, yd, lab, cd, sd in zip(x_ord, y_ord, lab_ord, c_ord, s_ord):
+            for xd, yd, lab, cd, sd in zip(Df[:, k], Df[:, y_idx], demo_text_labels, demo_colors, demo_sizes):
+                xd = float(xd)
+                yd = float(yd)
+                if lab is None:
+                    axk.scatter(
+                        [xd], [yd],
+                        color=cd,
+                        alpha=alpha_demos,
+                        marker=default_demo_marker,
+                        #  s=float(sd),
+                        zorder=3,
+                    )
+                else:
+                    axk.annotate(
+                        str(lab),
+                        (xd, yd),
+                        xytext=(2, 2),
+                        textcoords="offset points",
+                        ha="left",
+                        va="bottom",
+                        fontsize=fontsize_demos,
+                        color=cd,
+                        alpha=alpha_demos,
+                        clip_on=True,
+                        zorder=5,
+                    )
+
+            # means
+            rx = float(Xm[:, k].mean())
+            ry = float(Xm[:, y_idx].mean())
+            dx = float(Df[:, k].mean())
+            dy = float(Df[:, y_idx].mean())
+
+            axk.scatter(rx, ry, s=s_means, marker="D", color=rcolor, zorder=7)
+            axk.scatter(dx, dy, s=s_means, marker="*", color="cyan", zorder=7)
+
+            axk.set_title(
+                feature_names[k],
+                loc="center",
+                color=rcolor,
+                fontweight="bold",
+                fontsize=11,
+            )
+            axk.text(
+                0.5, 1.00,
+                f"logprob ∈ [{p_raw.min():.3g}, {p_raw.max():.3g}]",
+                transform=axk.transAxes,
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color=rcolor,
+            )
+
+            axk.set_xlabel(feature_names[k])
+            if k == 0:
+                axk.set_ylabel("zero_one")
+
+            _apply_limits_from_data(
+                axk,
+                x_arrays=[Xm[:, k], Df[:, k]],
+                y_arrays=[Xm[:, y_idx], Df[:, y_idx]],
+                pad_frac=0.05,
+                start_offset=start_offset if "start_offset" in plot_zero_one_vs_features_demo_logprobs.__code__.co_varnames else None,
+            )
+
+            axk.grid(True, alpha=0.2)
+            axk.axhline(0.0, color="0.7", lw=0.8, zorder=0)
+            axk.axvline(0.0, color="0.7", lw=0.8, zorder=0)
+
+            axk.legend(
+                handles=[rollout_mean_handle, demo_mean_handle],
+                loc="best",
+                fontsize=8,
+                frameon=True,
+            )
+
+            out_axes.append(axk)
+
+    if created_fig and title is not None:
+        fig.suptitle(title, y=0.995)
+        fig.tight_layout()
+    # ---- size legend (10 bins) ----
+    size_levels = np.linspace(size_bin_min, size_bin_max, n_size_bins)
+    bin_centers = np.linspace(0.05, 0.95, n_size_bins)
+
+    # pick 3 representative bins to avoid clutter
+    idxs = [0, n_size_bins // 2, n_size_bins - 1]
+
+    size_handles = []
+    size_labels = []
+
+    for i in idxs:
+        size_handles.append(
+            plt.scatter([], [], s=size_levels[i], color="gray", alpha=0.6)
+        )
+        size_labels.append(f"{bin_centers[i]:.1f}")
+
+    # attach to first axis only (cleanest)
+    #  axes.flat[0].legend(
+    #      size_handles,
+    #      size_labels,
+    #      title="norm logprob",
+    #      loc="upper right",
+    #      fontsize=7,
+    #      title_fontsize=8,
+    #      frameon=True,
+    #  )
+    # ---- shared colorbar ----
+    from matplotlib.cm import ScalarMappable
+
+    if logprob_norm == "global":
+        sm = ScalarMappable(norm=norm, cmap=cmap_obj)
+    else:
+        # normalized [0,1]
+        sm = ScalarMappable(norm=mcolors.Normalize(vmin=0.0, vmax=1.0), cmap=cmap_obj)
+
+    sm.set_array([])
+
+    cbar = fig.colorbar(
+        sm,
+        ax=axes.ravel().tolist(),
+        fraction=0.015,
+        pad=0.02,
+    )
+
+    cbar.set_label("demo logprob", fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
+    return fig, axes

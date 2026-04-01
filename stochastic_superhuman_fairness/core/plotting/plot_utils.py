@@ -8,6 +8,158 @@ import matplotlib.axes
 import matplotlib.patches as patches
 from stochastic_superhuman_fairness.core.plotting.plotting_palettes import BASIC_PALETTE, cycle_palette_colors
 
+
+def normalize_rollout_modes(rollout_feats):
+    """
+    Normalize rollout_feats into a list of arrays, one per mode.
+
+    Accepts:
+      - array (R, K)          -> [array (R, K)]
+      - array (M, R, K)       -> [array (R, K) for each mode]
+      - list/tuple of arrays  -> [array (R_m, K), ...]
+
+    Returns:
+      modes: list of np.ndarray, each shape (R_m, K)
+    """
+    if isinstance(rollout_feats, (list, tuple)):
+        modes = [_to_np(x) for x in rollout_feats]
+    else:
+        X = _to_np(rollout_feats)
+        if X.ndim == 2:
+            modes = [X]
+        elif X.ndim == 3:
+            modes = [X[m] for m in range(X.shape[0])]
+        else:
+            raise ValueError(
+                f"rollout_feats must be one of: (R,K), (M,R,K), or list of (R_m,K). Got shape {X.shape}"
+            )
+
+    if len(modes) == 0:
+        raise ValueError("No rollout modes found.")
+
+    K = modes[0].shape[1]
+    for m, Xm in enumerate(modes):
+        if Xm.ndim != 2:
+            raise ValueError(f"Mode {m} must be 2D, got shape {Xm.shape}")
+        if Xm.shape[1] != K:
+            raise ValueError(
+                f"All modes must have same feature dimension K={K}. "
+                f"Mode {m} has shape {Xm.shape}."
+            )
+
+    return modes
+def _to_np(x):
+    """
+    Convert torch / numpy / list-like to numpy array.
+    Keeps float dtype and moves tensors to CPU.
+    """
+    if x is None:
+        return None
+
+    # torch tensor
+    if hasattr(x, "detach"):
+        return x.detach().cpu().numpy()
+
+    # already numpy
+    if isinstance(x, np.ndarray):
+        return x
+
+    # list / tuple
+    return np.asarray(x)
+
+def _resolve_colors(colors, n, default="#1f77b4"):
+    '''Resolve color list for colored demo plotting'''
+    if colors is None:
+        return [default] * n
+    if len(colors) != n:
+        raise ValueError(f"colors must have length {n}, got {len(colors)}.")
+    return [default if c is None else c for c in colors]
+
+# Text Helpers
+#============================================================================
+def _plot_text_points(ax, x, y, labels, *, color=None, alpha=1.0, fontsize=8,
+                      ha="center", va="center", zorder=3):
+    texts = []
+    for xi, yi, lab in zip(x, y, labels):
+        texts.append(
+            ax.text(
+                float(xi), float(yi), str(lab),
+                clip_on = True,
+                color=color, alpha=alpha, fontsize=fontsize,
+                ha=ha, va=va, zorder=zorder,
+            )
+        )
+    return texts
+
+
+def _validate_demo_labels(labels, D):
+    if labels is None:
+        return None
+    if len(labels) != D:
+        raise ValueError(f"demo_text_labels must have length {D}. Got {len(labels)}.")
+    return labels
+
+
+def _validate_rollout_mode_labels(labels, modes):
+    if labels is None:
+        return None
+    if len(labels) != len(modes):
+        raise ValueError(
+            f"rollout_text_labels must have one list per mode: expected {len(modes)}, got {len(labels)}."
+        )
+    for m, (labs, Xm) in enumerate(zip(labels, modes)):
+        if len(labs) != len(Xm):
+            raise ValueError(
+                f"rollout_text_labels[{m}] must have length {len(Xm)}. Got {len(labs)}."
+            )
+    return labels
+
+def _plot_mixed_text_points(
+    ax,
+    x,
+    y,
+    labels,
+    *,
+    colors=None,
+    default_color="#1f77b4",
+    alpha_text=1.0,
+    alpha_marker=1.0,
+    fontsize=8,
+    marker="o",
+    s=20,
+    text_offset=(2, 2),
+    zorder_text=3,
+    zorder_marker=2,
+):
+    colors = _resolve_colors(colors, len(x), default_color)
+
+    for xi, yi, lab, c in zip(x, y, labels, colors):
+        xi = float(xi)
+        yi = float(yi)
+
+        if lab is None:
+            ax.scatter(
+                [xi], [yi],
+                color=c,
+                alpha=alpha_marker,
+                marker=marker,
+                s=s,
+                zorder=zorder_marker,
+            )
+        else:
+            ax.annotate(
+                str(lab),
+                (xi, yi),
+                xytext=text_offset,
+                textcoords="offset points",
+                ha="left",
+                va="bottom",
+                fontsize=fontsize,
+                color=c,
+                alpha=alpha_text,
+                clip_on=True,
+                zorder=zorder_text,
+            )
 def add_hover_tooltips(artists, *, rollout_labels=None, demo_labels=None):
     """
     Adds interactive hover tooltips to scatter artists produced by plot_rollouts_vs_demos.
@@ -395,3 +547,29 @@ def _add_row_group_colors_to_heatmap(
             zorder=5,
         )
         ax.add_patch(rect)
+
+def _apply_limits_from_data(ax, x_arrays, y_arrays, pad_frac=0.05, start_offset = None):
+        all_x = np.concatenate([np.asarray(x).ravel() for x in x_arrays if len(x) > 0])
+        all_y = np.concatenate([np.asarray(y).ravel() for y in y_arrays if len(y) > 0])
+
+        xmin, xmax = float(all_x.min()), float(all_x.max())
+        ymin, ymax = float(all_y.min()), float(all_y.max())
+
+        dx = xmax - xmin
+        dy = ymax - ymin
+        if dx == 0:
+            dx = 1.0
+        if dy == 0:
+            dy = 1.0
+
+        xpad = pad_frac * dx
+        ypad = pad_frac * dy
+
+        if start_offset is not None:
+            ax.set_xlim(start_offset, xmax + xpad)
+            ax.set_ylim(start_offset, ymax + ypad)
+        else:
+            ax.set_xlim(xmin - xpad, xmax + xpad)
+            ax.set_ylim(ymin - ypad, ymax + ypad)
+
+

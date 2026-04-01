@@ -64,20 +64,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             mixtures=mixtures,
             n_total_policies=self.n_models,
         )
-        #  import ipdb;ipdb.set_trace()
-        # Assumes self.policy is an nn.Module created in LogisticRegressionModel.__init__.
-        #  log_policy = train_logistic_from_demos(demonstrator.train_demos)
-        #  import ipdb;ipdb.set_trace()
-        #  logistic_policy = load_saved_sklearn_policy_into_torch(
-        #      os.path.join(CURRENT_DIR, "../../data/checkpoints/logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl"),
-        #      device=self.device,
-        #  )
-        #  self.policies = self.init_policy_mixture([self.policy, logistic_policy], [1, 1], 2)
-        #  self.policies = self.init_policy_mixture([self.policy], [8], 8)
-        #  self.policies = self.init_policy_mixture([logistic_policy], [3], 3)
-        #  self.policies = self.init_policy_mixture([logistic_policy], [100], 100)
-        #  import ipdb;ipdb.set_trace()
-        #  self.policies = nn.ModuleList([self._clone_policy() for _ in range(self.n_models)])
 
         # optional: initialize ensemble members slightly differently
         init_noise = float(self.model_cfg.get("init_noise_std", 0.05))
@@ -265,12 +251,12 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             torch.as_tensor(S, device=device).float()
             <= torch.as_tensor(S_rev_ji, device=device).float()
         ).float()
-        #  S0_indicator = S == 0
-        #  S0_indicator = S <= 0.1
-        #  indicator = torch.logical_and(S0_indicator, win_indicator).float()
         #  indicator = (S == 0.0).float()
         #  indicator = (S <= S.mean()).float()
+        #  indicator = (S <= S.median() ).float()
         indicator = (S <= 0.2).float()
+        #  indicator = (S <= 0.01).float()
+        #  indicator = win_indicator
         #  import ipdb;ipdb.set_trace()
         indicator_rev = (
             torch.as_tensor(S_rev_ji, device=device).float()
@@ -301,9 +287,11 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
                           'per_mode_dominant_rollouts': indicator.sum(axis=1).reshape(P, n_rollouts).tolist(),
                           'per_mode_dominant_demos': indicator_rev.sum(axis=1).reshape(P, n_rollouts).tolist(),
-                          'S_mean': loss_out.info['S_mean'],'norm_paired_subdom': loss_out.info['norm_paired_subdom']
+                          'S_mean': loss_out.info['S_mean'],'norm_paired_subdom': loss_out.info['norm_paired_subdom'],
+                          'demo_logprobs':[loss_out.info['demo_logprobs'][m* n_rollouts].cpu().tolist() for m in range(P)],
                           }
 
+        #  import ipdb;ipdb.set_trace()
         if not no_update:
             self.optimizer.zero_grad(set_to_none=True)
             loss_out.loss.backward()

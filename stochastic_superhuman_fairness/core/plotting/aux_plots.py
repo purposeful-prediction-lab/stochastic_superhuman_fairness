@@ -1,7 +1,10 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-from stochastic_superhuman_fairness.core.plotting.plot_utils import  _add_row_group_colors_to_heatmap
+from stochastic_superhuman_fairness.core.plotting.plot_utils import  (
+        _add_row_group_colors_to_heatmap, _to_np,
+        normalize_rollout_modes,
+        )
 
 
 def plot_subdominance_heatmap(
@@ -191,62 +194,6 @@ def plot_ot_solution_heatmaps(
     axes.set_xlabel("demos")
     axes.set_ylabel("rollouts")
     if show_colorbar: fig.colorbar(im0, ax=axes, fraction=0.046, pad=0.04)
-
-    #  if mode == "replicate":
-    #      U = np.repeat(u[:, None], D, axis=1)   # (R,D)
-    #      V = np.repeat(v[None, :], R, axis=0)   # (R,D)
-    #
-    #      im1 = axes[1].imshow(U, aspect="auto")
-    #      _add_row_group_colors_to_heatmap(
-    #          axes[1], R,
-    #          row_groups=row_groups,
-    #          group_colors=group_colors,
-    #          strip_width=group_strip_width,
-    #      )
-    #      axes[1].set_title("dual_rows (replicated)")
-    #      axes[1].set_xlabel("demos")
-    #      axes[1].set_ylabel("rollouts")
-    #      if show_colorbar: fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-    #
-    #      im2 = axes[2].imshow(V, aspect="auto")
-    #      _add_row_group_colors_to_heatmap(
-    #          axes[2], R,
-    #          row_groups=row_groups,
-    #          group_colors=group_colors,
-    #          strip_width=group_strip_width,
-    #      )
-    #      axes[2].set_title("dual_cols (replicated)")
-    #      axes[2].set_xlabel("demos")
-    #      axes[2].set_ylabel("rollouts")
-    #      if show_colorbar: fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-    #
-    #  else:  # mode == "sum"
-    #      UV = u[:, None] + v[None, :]           # (R,D)
-    #      im1 = axes[1].imshow(UV, aspect="auto")
-    #      _add_row_group_colors_to_heatmap(
-    #          axes[1], R,
-    #          row_groups=row_groups,
-    #          group_colors=group_colors,
-    #          strip_width=group_strip_width,
-    #      )
-    #      axes[1].set_title("dual potential (u + v)")
-    #      axes[1].set_xlabel("demos")
-    #      axes[1].set_ylabel("rollouts")
-    #      if show_colorbar: fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-    #
-    #      # keep 3 panels: show also separate sign structure via centered version
-    #      UVc = UV - UV.mean()
-    #      im2 = axes[2].imshow(UVc, aspect="auto")
-    #      _add_row_group_colors_to_heatmap(
-    #          axes[2], R,
-    #          row_groups=row_groups,
-    #          group_colors=group_colors,
-    #          strip_width=group_strip_width,
-    #      )
-    #      axes[2].set_title("(u + v) centered")
-    #      axes[2].set_xlabel("demos")
-    #      axes[2].set_ylabel("rollouts")
-    #      if show_colorbar: fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -731,3 +678,78 @@ def plot_paired_subdominance_curve(
 
     fig.tight_layout()
     return fig, (ax_left, ax_right)
+
+#----------------------------------------------------------------------------------------------------
+import math
+import matplotlib.pyplot as plt
+
+
+def _format_cfg(obj, indent=0):
+    sp = "  " * indent
+
+    if isinstance(obj, dict):
+        lines = []
+        for k, v in obj.items():
+            if isinstance(v, (dict, list, tuple)):
+                lines.append(f"{sp}{k}:")
+                lines.append(_format_cfg(v, indent + 1))
+            else:
+                lines.append(f"{sp}{k}: {v}")
+        return "\n".join(lines)
+
+    if isinstance(obj, (list, tuple)):
+        lines = []
+        for v in obj:
+            if isinstance(v, (dict, list, tuple)):
+                lines.append(f"{sp}-")
+                lines.append(_format_cfg(v, indent + 1))
+            else:
+                lines.append(f"{sp}- {v}")
+        return "\n".join(lines)
+
+    return f"{sp}{obj}"
+
+
+def plot_cfg_string(cfg, *, ax=None, title="Configuration", fontsize=10, line_height=1.35,
+                    width=12, margin_top=0.04, margin_left=0.02):
+    """
+    Create an empty plot and draw the config string on it.
+
+    If ax is None, creates a figure whose height is estimated from the
+    number of text lines so the whole string fits.
+    """
+    txt = _format_cfg(cfg)
+    lines = txt.splitlines()
+    n_lines = max(1, len(lines) + 2)  # + title space
+
+    if ax is None:
+        # rough height estimate in inches
+        height = max(4, 0.22 * n_lines * (fontsize / 10) * line_height)
+        fig, ax = plt.subplots(figsize=(width, height))
+    else:
+        fig = ax.figure
+
+    ax.clear()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+
+    if title:
+        ax.set_title(title, fontsize=fontsize + 2, pad=12)
+
+    ax.text(
+        margin_left,
+        1 - margin_top,
+        txt,
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=fontsize,
+        family="monospace",
+        color="black",
+        linespacing=line_height,
+        clip_on=False,
+    )
+
+    fig.tight_layout()
+    return fig, ax

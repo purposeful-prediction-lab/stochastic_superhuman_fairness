@@ -37,6 +37,7 @@ def main(cfg: DictConfig):
 
         print("🚀 Starting training...")
         learner.run()
+        logger.save_config_as_txt(learner.model.cfg)
         logger.mark_completed()
         logger.close()
     except KeyboardInterrupt:

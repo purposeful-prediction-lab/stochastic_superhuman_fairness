@@ -39,8 +39,8 @@ class Demonstrator:
         if auto_create:
             self.create_demos(to_torch = self.to_torch_flag)
             self._compute_standalone_demofeats()
-        self.compute_demo_ranking()
         self.keep_only_requested_fairness_metrics(required_metrics=self.metrics)
+        self.compute_demo_ranking()
         #  import ipdb;ipdb.set_trace()
 
     
@@ -57,13 +57,6 @@ class Demonstrator:
         self.train_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.train_demo_feats)
         self.eval_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.eval_demo_feats)
 
-    #  def get_all_demo_labels(self):
-    #      if not hasattr(self, 'all_demo_labels'):
-    #          types = ['train', 'eval']
-    #          for t in types:
-    #              get = self__dict__[f'{t}_demos'].__getitem__
-    #              self.__dict__[f'{t}_all_demo_labels'] = [get(i) for i in self.__dict__[f'demo_ranking_{t}']]
-    #
     # --------------------------------------------------
     def compute_demo_ranking(self):
         self.num_demos_train = len(self.train_demo_feats)
@@ -90,6 +83,11 @@ class Demonstrator:
         for t in types:
             get = self.__dict__[f'{t}_demo_feats'].__getitem__
             self.__dict__[f'{t}_demo_feats_sorted'] = [get(i) for i in self.__dict__[f'demo_ranking_{t}']]
+
+    def get_demo_rankings(self):
+        if not hasattr(self, 'demo_ranking_train'):
+            self.compute_demo_ranking()
+        return self.demo_ranking_train, self.demo_ranking_eval
 
     def get_rank_sorted_demo_feats(self):
         if not hasattr(self, 'train_demo_feats_sorted'):

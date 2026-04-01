@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 import zipfile
 from stochastic_superhuman_fairness.core.utils import ns_to_dict
+from stochastic_superhuman_fairness.core.utils_io import save_dict_text, filter_dict_exclude
 
 def _is_dictlike(x):
     return isinstance(x, Mapping) or isinstance(x, SimpleNamespace)
@@ -203,7 +204,7 @@ class Logger:
     def log(self, record: dict, flatten: bool = False, keep_path: bool = True, verbose: bool = True, 
             no_print: list = []):
 
-        no_print += ['time','algo','epoch','phase', 'gamma_matrix']
+        no_print += ['time','algo','epoch','phase', 'gamma_matrix', 'demo_logprobs']
 
         record = {k: v for k, v in record.items() if (v is not None) and (k != 'gamma_matrix')}
         if flatten:
@@ -213,6 +214,7 @@ class Logger:
         self._file.write(json.dumps(record) + "\n")
 
         """Log one training/eval record to console + file."""
+        p_record = filter_dict_exclude(record, no_print)
         if verbose:
             if "algo" in record and "epoch" in record:
                 tag = f"[{record['algo'].upper()} | Epoch {record['epoch']}]"
@@ -220,7 +222,8 @@ class Logger:
                 tag = f"[→ PHASE {record['phase']}: {record['algo'].upper()}]"
             else:
                 tag = "[LOG]"
-            msg = f"\n{tag} { {k:v for k,v in record.items() if (k not in no_print) and 'dir' not in k} }"
+            #  msg = f"\n{tag} { {k:v for k,v in p_record.items() if (k not in no_print) and 'dir' not in k} }"
+            msg = f"\n{tag} { {k:v for k,v in p_record.items()}}"
             print(msg)
 
     # ----------------------------------------------------------
@@ -234,6 +237,12 @@ class Logger:
         })
 
     # ----------------------------------------------------------
+
+    def save_config_as_txt(self, cfg):
+        cfg_dict = ns_to_dict(cfg)
+        os.makedirs(self.ckpt_dir, exist_ok=True)
+        file_path = os.path.join(self.ckpt_dir, "configs.txt")
+        save_dict_text(cfg_dict, path = file_path)
 
     def save_checkpoint(self, model, phase_idx: int, algo: str, cfg):
         """

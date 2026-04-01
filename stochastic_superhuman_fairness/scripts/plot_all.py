@@ -6,9 +6,13 @@ import matplotlib.pyplot as plt
 
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
 from stochastic_superhuman_fairness.core.models.model_io_utils import load_model_from_archive
-from stochastic_superhuman_fairness.core.utils_io import load_metrics_jsonl, classify_arg, get_base_path
+from stochastic_superhuman_fairness.core.utils_io import load_metrics_jsonl, classify_arg, get_base_path, split_path, save_dict_text
 from stochastic_superhuman_fairness.core.utils import trajectory_logprob
-from stochastic_superhuman_fairness.core.plotting.rollout_plots import plot_zero_one_vs_features_subplots, plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features, plot_zero_one_vs_features_subplots
+from stochastic_superhuman_fairness.core.plotting.rollout_plots import(
+        plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features,
+        plot_zero_one_vs_features_mode_coupling, 
+        plot_zero_one_vs_features_demo_logprobs
+        )
 from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_and_subdom
 from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
 from stochastic_superhuman_fairness.core.plotting.plotting_palettes import MODE_PALETTE_100_PAPERSAFE, MODE_PALETTE_100_MAXVAR
@@ -17,6 +21,7 @@ from stochastic_superhuman_fairness.core.plotting.aux_plots import (
         plot_subdominance_heatmap, plot_optimal_transport_solution,
         plot_ot_solution_heatmaps, plot_indicator_matrix,
         plot_dominance_counts,
+        plot_cfg_string,
         )
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
     compute_subdominance_matrix,
@@ -92,11 +97,14 @@ def main():
         use_safe_load=True,
         overwrite_demos = False,
     )
+    model_name = print(args.archive.rsplit(os.path.sep,1)[-1]) if classify_arg(args.archive)  != 'name' else args._archive
     if args.ref_model is not None:
         if classify_arg(args.ref_model)  == 'name':
             ref_path = os.path.join(get_base_path(args.archive), args.ref_model)
+            ref_model_name = args.ref_model
         else:
             ref_path = args.ref_model
+            _, ref_model_name = split_path(args.ref_model)
         # Load reference model if required
         ref_model, _, _ = load_model_from_archive(
             archive_path=ref_path,
@@ -117,14 +125,11 @@ def main():
     else:
         demos_all = demo.eval_demos
         demo_feats = s_eval_demo_feats
-        #  demos_all = demo.train_demos if args.split == "train" else demo.eval_demos
-    #  demo_feats = np.stack([d["fairness_feats"] for d in demos_all])  # [D, K]
 
     if demos_all is None or len(demos_all) == 0:
         raise RuntimeError(f"No demos found for split={args.split}")
     demo_labels = [d['y'] for d in demos_all]
     per_policy_rollouts = args.per_policy_rollouts if args.per_policy_rollouts is not None else 10
-    #  n_rollouts = args.n_rollouts if args.n_rollouts is not None else len(demos_all)
     demos_sel = _choose_demos(demos_all, n=len(demos_all), seed=args.seed)
     pcfg = cfg.phase_cfg
 
@@ -212,38 +217,6 @@ def main():
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-    # Plot Zero One vs All Other Features
-    # =====================================================================================
-    if args.ref_model is not None:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        _, _ = plot_zero_one_vs_features(
-                feats_by_mode_ref,
-                demo_feats,
-                ax = axes[1],
-                feature_names=feature_names,
-                title = "Reference Model Zero-one vs Features",
-                baselines = demo.meta['baseline_fairness_features'],
-                mode_colors = mode_palette,
-                alpha_rollouts = args.r_opacity,
-            )
-        main_ax = axes[0]
-    else:
-        main_ax = None
-    _, _ = plot_zero_one_vs_features(
-        feats_by_mode,
-        demo_feats,
-        ax = main_ax,
-        feature_names=feature_names,
-        baselines = demo.meta['baseline_fairness_features'],
-        mode_colors = mode_palette,
-        alpha_rollouts = args.r_opacity,
-    )
-        # Save
-    out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
-    fig.savefig(out_path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
-    print("Saved plot:", out_path)
-
     # Plot Subdominance as heatmap
     # =====================================================================================
     S = compute_subdominance_matrix_grouped(
@@ -260,7 +233,6 @@ def main():
         sorted_rollout_groupings.append([idx_offset+ i for i in range(len(mode))])
         idx_offset += len(mode)
 
-    #  import ipdb;ipdb.set_trace()
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig, _ = plot_subdominance_heatmap(S, ax = axes[0], row_groups = sorted_rollout_groupings, group_colors = mode_palette, group_strip_width = 2.18)
     # Plot OT Coupling
@@ -271,7 +243,6 @@ def main():
                 normalize_subdom=False,
         )
     gamma_temp = cfg.learner.get('default').get('train').get('stochastic').get('gamma_temperature', 1.0)
-    #  import ipdb;ipdb.set_trace()
     gamma_temp = 1.0
     fig, _ = plot_ot_solution_heatmaps(out, ax= axes[1], gamma_temperature = gamma_temp, row_groups = sorted_rollout_groupings, 
                                           group_strip_width = 2.18,
@@ -282,6 +253,65 @@ def main():
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+    # Plot Coupling for each mode and demo
+    # =====================================================================================
+    demo_text_labels = np.arange(20).tolist() + [None] * (len(demo_feats)-20)
+    mode_colors = mode_palette[:len(feats_by_mode)]
+
+    fig, axes = plot_zero_one_vs_features_mode_coupling(
+        rollout_feats=feats_by_mode,         # list of (r_m, K)
+        demo_feats=demo_feats,               # (D, K)
+        gamma=out['gamma_np'],                         # (sum_r_m, D) or list[(r_m,D)]
+        feature_names=feature_names,
+        annotate_sidebar = [f"Highest\nBeat Rate", "Lowest"],
+        mode_colors = mode_palette,
+        demo_text_labels=demo_text_labels,         # e.g. [None, 2, None, 5, ...]
+        cmap="viridis",
+        coupling_norm="per_mode",
+    )
+    # Save
+    out_path = os.path.join(save_dir, "per_policy_coupling.png")
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print("Saved plot:", out_path)
+
+    # Plot Zero One vs All Other Features
+    # =====================================================================================
+    if args.ref_model is not None:
+        #  demo_text_labels = np.arange(20).tolist() + [None] * (len(demo_feats)-20)
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        _, _ = plot_zero_one_vs_features(
+                feats_by_mode_ref,
+                demo_feats,
+                ax = axes[1],
+                plot_demos_as_text = False,
+                demo_text_labels = None,
+                feature_names=feature_names,
+                title = f"{model_name} Zero-one vs Features",
+                baselines = demo.meta['baseline_fairness_features'],
+                mode_colors = mode_palette,
+                alpha_rollouts = args.r_opacity,
+            )
+        main_ax = axes[0]
+    else:
+        main_ax = None
+        fig, _ = plot_zero_one_vs_features(
+            feats_by_mode,
+            demo_feats,
+            ax = main_ax,
+            feature_names=feature_names,
+            baselines = demo.meta['baseline_fairness_features'],
+            mode_colors = mode_palette,
+            alpha_rollouts = args.r_opacity,
+        )
+    # Save
+    out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print("Saved plot:", out_path)
+
+    
     # Plot  Subdominance Indicator Matrix
     # =====================================================================================
     S_demo_roll = compute_subdominance_matrix_grouped(
@@ -360,9 +390,26 @@ def main():
     print(f'Saving losses.png to {out_path}')
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
+    # Plot Demo Log Probs
+    # =====================================================================================
+    fig, ax = plot_zero_one_vs_features_demo_logprobs(
+                    feats_by_mode,
+                    demo_feats,
+                    logs,
+                    #  ax = axes[1],
+                    feature_names=feature_names,
+                    title = f"{model_name} Demo log Probablity",
+                    mode_colors = mode_palette,
+                    alpha_rollouts = args.r_opacity,
+                )
+    # Save
+    out_path = os.path.join(save_dir, "demo_logprobs.png")
+    print(f'Saving demo_logprobs.png to {out_path}')
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
     # Plot Loss Term Activations
     # =====================================================================================
-    #  fig, _ = plot_dominance_counts(logs)
     fig, _ = plot_dominance_counts(
         logs,
         per_mode="train/l_terms/per_mode_dominant_rollouts",
@@ -374,6 +421,18 @@ def main():
     print(f'Saving loss_term_activation_counts.png to {out_path}')
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
+
+
+    # Plot Configs
+    # =====================================================================================
+    #  fig, ax = plot_cfg_string(cfg)
+    # Save
+    out_path = os.path.join(save_dir, "configs.txt")
+    save_dict_text(cfg, path = out_path)
+    print(f'Saving configs.txt to {out_path}')
+    #  fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    #  plt.close(fig)
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

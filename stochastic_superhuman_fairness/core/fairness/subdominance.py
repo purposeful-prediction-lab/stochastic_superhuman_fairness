@@ -168,6 +168,7 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
         "term2": float(term2.detach().cpu()),
         'S_mean': S.mean().detach().cpu().item(),
         "norm_paired_subdom":  ((gamma * S).sum()/gamma.sum()).detach().cpu().item(),
+        'demo_logprobs': bce_pair.detach(),
     }
     return SubdomLossOut(loss=loss, info=info)
 # ---------------------------------------------------------------------------------
