@@ -1,4 +1,5 @@
 import torch
+from typing import Literal, Union
 import numpy as np
 import mosek
 import matplotlib.pyplot as plt
@@ -8,11 +9,15 @@ from stochastic_superhuman_fairness.core.utils import minmax_normalize
 def bj_from_beatrates_nocollapse(
     beat_rates,
     tau: float = 5.0,
-    uniform_mix: float = 0.1,    # lambda
+    uniform_mix: float = 0.0,    # lambda
     b_min: float = 0.0,          # e.g. 1e-3 / D
     center: str = "half",        # "none" | "mean" | "half"
     eps: float = 1e-12,
-):
+    rank_type: Literal['rev_ranking', 'ranking', None] = 'ranking',
+)-> Union[None, np.ndarray]:
+
+    if rank_type is None:
+        return None
     br = np.asarray(beat_rates, dtype=float)
 
     if center == "mean":
@@ -21,8 +26,8 @@ def bj_from_beatrates_nocollapse(
         x = br - 0.5
     else:
         x = br
-
-    w = np.exp(tau * x)
+    sign = -1 if rank_type == 'rev_ranking' else 1
+    w = np.exp(sign*tau * x)
     b = w / (w.sum() + eps)
 
     # uniform mixing

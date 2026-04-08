@@ -33,7 +33,7 @@ subdominance:
 # Demonstrator configuration
 # =========================
 demonstrator:
-  dataset: "adult" # adult or compass
+  dataset: "adult" # adult or compas
   shared_x: True
   demotype: lrdecisions  # partition or lrdecisions
   # LR (Logistic Regression) Decisions Specific
@@ -67,16 +67,17 @@ learner:
       eval_freq: 200
       train_print_freq: 100
       model_cfg:
+        post_eval_transfer: False
         # policy_sources: ['random', 'logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
-        policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
+        # policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
         # policy_sources: ['logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
         # policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl', 'logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
-        # policy_sources: ['random']
+        policy_sources: ['random']
         policy_mixture: [1.]
-        n_models: 2
+        n_models: 1
         init_noise_std: 0.1
       train:
-        lr: 0.001
+        lr: 0.003
         batch_size: 100
         n_rollouts: 10
         t_function: 'vec' # old, ref, vec, collect
@@ -106,8 +107,9 @@ learner:
       optimizer: 'adam' # adam, sgd
       stochastic:
         solver: 'mosek'
+        weighted_S_matrix: True
         row_constraints: False         # Bool
-        col_constraints: #'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking
+        col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking
         ot_temperature: 1.0
         gamma_temperature: 1.0
         normalize_s_matrix: False

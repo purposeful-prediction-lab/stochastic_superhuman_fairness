@@ -65,6 +65,7 @@ def main():
     ap.add_argument("--phase", type=int, default=0)
     ap.add_argument("--split", choices=["train", "eval"], default="eval")
     ap.add_argument("--palette", choices=["paper", "vis"], default="vis")
+    ap.add_argument("--ot_solver", choices=["mosek", "sinkhorn", None], default=None, help="OT solver. Default is whatever the model has in their config.")
     ap.add_argument("--per_policy_rollouts", type=int, default=10, help="Number of rollouts to collect, per policy.")
     #  ap.add_argument("--n_rollouts", type=int, default=100, help="Number of rollouts to collect (default: number of demos in split).")
     ap.add_argument("--decision_threshold", type=float, default=0.5, help="Decision threshold for action sampling.")
@@ -97,7 +98,10 @@ def main():
         use_safe_load=True,
         overwrite_demos = False,
     )
+
     model_name = print(args.archive.rsplit(os.path.sep,1)[-1]) if classify_arg(args.archive)  != 'name' else args._archive
+    ot_solver = cfg.learner.default.train.stochastic.solver if args.ot_solver is None else args.ot_solver
+
     if args.ref_model is not None:
         if classify_arg(args.ref_model)  == 'name':
             ref_path = os.path.join(get_base_path(args.archive), args.ref_model)
@@ -238,7 +242,7 @@ def main():
     # Plot OT Coupling
     out = solve_stochastic_subdom_coupling(
                 S,
-                solver="sinkhorn",
+                solver= ot_solver,
                 weight_method="primal",
                 normalize_subdom=False,
         )
@@ -288,7 +292,7 @@ def main():
                 plot_demos_as_text = False,
                 demo_text_labels = None,
                 feature_names=feature_names,
-                title = f"{model_name} Zero-one vs Features",
+                title = f"{ref_model_name} Zero-one vs Features",
                 baselines = demo.meta['baseline_fairness_features'],
                 mode_colors = mode_palette,
                 alpha_rollouts = args.r_opacity,
@@ -296,15 +300,16 @@ def main():
         main_ax = axes[0]
     else:
         main_ax = None
-        fig, _ = plot_zero_one_vs_features(
-            feats_by_mode,
-            demo_feats,
-            ax = main_ax,
-            feature_names=feature_names,
-            baselines = demo.meta['baseline_fairness_features'],
-            mode_colors = mode_palette,
-            alpha_rollouts = args.r_opacity,
-        )
+    fig2, _ = plot_zero_one_vs_features(
+        feats_by_mode,
+        demo_feats,
+        ax = main_ax,
+        feature_names=feature_names,
+        baselines = demo.meta['baseline_fairness_features'],
+        mode_colors = mode_palette,
+        alpha_rollouts = args.r_opacity,
+    )
+    fig = fig2 if args.ref_model is not None else fig
     # Save
     out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")

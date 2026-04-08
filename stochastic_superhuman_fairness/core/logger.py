@@ -179,17 +179,6 @@ class Logger:
             return run_id
         finally:
             self._release_lock(fd)
-    #  def __init__(self, log_dir="./logs", exp_name="run"):
-    #      timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    #      self.log_dir = os.path.join(log_dir, exp_name)
-    #      os.makedirs(self.log_dir, exist_ok=True)
-    #      self.file_path = os.path.join(self.log_dir, f"training_{timestamp}.jsonl")
-    #      self.ckpt_dir = os.path.join(self.log_dir, "checkpoints")
-    #      os.makedirs(self.ckpt_dir, exist_ok=True)
-    #
-    #      self._file = open(self.file_path, "a", buffering=1)  # line-buffered
-    #      self._write_header()
-    #      print(f"🧾 Logging to {self.file_path}")
 
     # ----------------------------------------------------------
     def _write_header(self):

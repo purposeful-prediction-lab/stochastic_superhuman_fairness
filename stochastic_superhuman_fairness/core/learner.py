@@ -99,6 +99,7 @@ class Learner:
                     "algo": algo,
                     "stage": "train"
                 })
+                self.model.post_train()
                 self._log(stats_train, verbose = (ep % phase_cfg['train_print_freq'] == 0), no_print_keys=['per_mode'])
 
                 # ---- Conditional evaluation ----
@@ -110,6 +111,8 @@ class Learner:
                         "algo": algo,
                         "stage": "eval"
                     })
+                    #  import ipdb;ipdb.set_trace()
+                    self.model.post_eval(eval_stats)
                     self._log(eval_stats)
                     self.save_best_model(eval_stats, {**self.cfg, 'phase_cfg': phase_cfg}, algo_tag = algo, metric = 'eval/zero_one_loss')
 

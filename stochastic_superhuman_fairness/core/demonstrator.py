@@ -4,6 +4,7 @@ import random
 import torch
 from pathlib import Path
 from sklearn.preprocessing import StandardScaler
+from typing import Literal, Optional, Tuple, Dict, Union
 from omegaconf import OmegaConf
 from stochastic_superhuman_fairness.core.dataset_utils import load_adult, load_compas
 from stochastic_superhuman_fairness.core.data_defaults import DEFAULT_DATA_CONFIGS
@@ -11,6 +12,7 @@ from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC
 from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features, compute_beat_rates
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict, sample_logistic_model
+from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features
 
 
 class Demonstrator:
@@ -41,18 +43,38 @@ class Demonstrator:
             self._compute_standalone_demofeats()
         self.keep_only_requested_fairness_metrics(required_metrics=self.metrics)
         self.compute_demo_ranking()
+        self.compute_intrademo_subdom()
         #  import ipdb;ipdb.set_trace()
 
     
     # --------------------------------------------------
-    #  def get_top_k(self, k : float):
+    def compute_intrademo_subdom(self, alpha: float = None, beta = None):
+        '''Default alpha = all ones and beta 0. scalars are repeated to match feature dim K.
+           Per rollout reduction is mean.
+        '''
+        keys = ['train', 'eval']
+        for key in keys:
+            feats = self.__dict__[f'{key}_demo_feats'] 
+            self.__dict__[f'{key}_intrademo_subdom_dict'] = subdominance_loss_from_features(feats, feats)
+            self.__dict__[f'{key}_intrademo_subdom_dict']['median'] = np.median(
+                    self.__dict__[f'{key}_intrademo_subdom_dict']['per_rollout'])
+            self.__dict__[f'{key}_intrademo_mean_subdom'] = self.__dict__[f'{key}_intrademo_subdom_dict']['per_rollout'].mean()
+
+    # --------------------------------------------------
+
+    #  def get_top_k(self, k : float, metric: Literal["beat_rate", "subdom"] = "beat_rate"):
     #      if (k>0) and (k <=1.):
     #          int_k = int(k*len(self.train_demo_feats))
     #      elif k >  self.num_demos_train:
     #          int_k = self.num_demos_train
 
+    # --------------------------------------------------
+
     def _compute_standalone_demofeats(self):
-        self.train_demo_feats = np.stack([d["fairness_feats"] for d in self.train_demos])  # [D,K]      
+        try:
+            self.train_demo_feats = np.stack([d["fairness_feats"] for d in self.train_demos])  # [D,K]      
+        except:
+            import ipdb;ipdb.set_trace()
         self.eval_demo_feats = np.stack([d["fairness_feats"] for d in self.eval_demos])  # [D,K]      
         self.train_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.train_demo_feats)
         self.eval_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.eval_demo_feats)

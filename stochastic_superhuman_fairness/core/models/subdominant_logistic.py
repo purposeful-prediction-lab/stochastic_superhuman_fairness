@@ -18,6 +18,7 @@ from stochastic_superhuman_fairness.core.fairness.subdominance import (
         )
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import compute_fairness_features, compute_fairness_features_batched, compute_fairness_features_batched_fast
 from stochastic_superhuman_fairness.core.utils import sample_binary_from_probs, sample_rollouts_from_probs
+from stochastic_superhuman_fairness.core.models.ensemble_utils import mix_policies_, params_changed, reset_optimizer_state_
 from stochastic_superhuman_fairness.core.rollout_utils import collect_rollouts
 from stochastic_superhuman_fairness.core.baselines.logistic_regression import (
         train_logistic_from_demos, load_saved_sklearn_policy_into_torch,  sklearn_logistic_to_torch_clone,
@@ -65,10 +66,12 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             n_total_policies=self.n_models,
         )
 
+
         # optional: initialize ensemble members slightly differently
         init_noise = float(self.model_cfg.get("init_noise_std", 0.05))
         if init_noise > 0:
             self._perturb_ensemble(init_noise)
+        self.init_policies = [p.clone() for p in self.policies.parameters()]
         # optimizer (can be replaced externally)
         lr = float(self.cfg.get("train", {}).get("lr", 1e-3))
         wd = float(self.cfg.get("train", {}).get("weight_decay", 0.0))
@@ -76,6 +79,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             self.optimizer = torch.optim.SGD(self.policies.parameters(), lr=lr, weight_decay=wd)
         else:
             self.optimizer = torch.optim.Adam(self.policies.parameters(), lr=lr, weight_decay=wd)
+        # Other Parameters
+        self.post_eval_transfer = int(self.model_cfg.get("post_eval_transfer", False))
         #  import ipdb;ipdb.set_trace()
 
     def _perturb_ensemble(self, std: float):
@@ -107,6 +112,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         n_rollouts: int = None,
         decision_threshold: float | None = None,
         solver: str = "mosek",
+        weighted_S_matrix: bool = False,
         row_constraints: bool = False,
         col_constraints: str = None, # None, rev_ranking
         ot_temperature: float = 1.0,
@@ -148,7 +154,10 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         feat_per_policy = []
 
         for pol in policies:
-            logits = pol(X).squeeze(-1)                      # [N]
+            try:
+                logits = pol(X).squeeze(-1)                      # [N]
+            except:
+                import ipdb;ipdb.set_trace()
             probs = torch.sigmoid(logits)                    # [N]
 
             if (decision_threshold is not None) and (not stochastic_if_threshold):
@@ -218,13 +227,12 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         # ----------------------------------------------------
         # 4) OT solve -> gamma
         # ----------------------------------------------------
-        if col_constraints == 'rev_ranking':
-            bj_priors = bj_from_beatrates_nocollapse(demonstrator.beat_rates_train)
-        else:
-            bj_priors  = None
+        # None = uniiform | rev_ranking ~ -e(T*beat_rate) | ranking ~ e(T*beat_rate)
+        bj_priors = bj_from_beatrates_nocollapse(demonstrator.beat_rates_train, rank_type = col_constraints)
         #  import ipdb;ipdb.set_trace()
+        S_OT = S * torch.tensor(bj_priors, device=S.device) if weighted_S_matrix else S
         out = solve_stochastic_subdom_coupling(
-            S,
+            S_OT,
             solver=solver,
             weight_method="primal",
             normalize_subdom=normalize_s_matrix,
@@ -254,7 +262,9 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         #  indicator = (S == 0.0).float()
         #  indicator = (S <= S.mean()).float()
         #  indicator = (S <= S.median() ).float()
-        indicator = (S <= 0.2).float()
+        # Select rollouts whose subdom is less than the weighted subdom of demos.
+        indicator = (S <= demonstrator.train_intrademo_subdom_dict['median']).float()
+        #  indicator = (S <= 0.2).float()
         #  indicator = (S <= 0.01).float()
         #  indicator = win_indicator
         #  import ipdb;ipdb.set_trace()
@@ -284,7 +294,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                 gamma=gamma,                      # [R,D]
                 indicator_win=indicator,          # [R,D]
             )
-        loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
+        loss_term_dict = {'dominant_rollouts': int(win_indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
                           'per_mode_dominant_rollouts': indicator.sum(axis=1).reshape(P, n_rollouts).tolist(),
                           'per_mode_dominant_demos': indicator_rev.sum(axis=1).reshape(P, n_rollouts).tolist(),
                           'S_mean': loss_out.info['S_mean'],'norm_paired_subdom': loss_out.info['norm_paired_subdom'],
@@ -297,6 +307,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             loss_out.loss.backward()
             self.optimizer.step()
 
+        #  import ipdb;ipdb.set_trace()
         # optional per-policy stats
         z1 = (yhat_rollouts != y_true.unsqueeze(0)).float().mean(dim=1)  # [R]
         per_policy = {}
@@ -323,6 +334,33 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                 }
 
 
+    #--------------------------------------------------------------------------------------------------------
+    def post_eval(self, eval_stats: dict):
+        ''' This function will perform a convex combination with parameter lambda between the best performing
+            ensemble module and the 50% worst performing ones.
+        '''
+        if self.post_eval_transfer:
+            zero_one_losses = np.array([es['eval/zero_one_loss'] for es in eval_stats['per_policy']])
+            low_perf_idxs = np.where(zero_one_losses > np.median(zero_one_losses))[0]
+            best_policy_idx = np.argmin(zero_one_losses).item()
+            #  changed, details = params_changed(
+            #      self,
+            #      mix_policies,          # your function
+            #      (self, best_policy_idx, low_perf_idxs),                  # fn args start here
+            #      return_details=True,
+            #  )
+            #  import ipdb;ipdb.set_trace()
+
+            #  print("Changed:", changed)
+            #  print(details)  # {(policy_idx, param_name): max_abs_diff}
+            mix_policies_(self, best_policy_idx, low_perf_idxs)
+            # Good practise to reset optimizers buffers for strongly altered params, especially with Adam.
+            modified_params = []
+            for b_idx in low_perf_idxs:
+                modified_params += list(self.policies[b_idx].parameters())
+
+            reset_optimizer_state_(self.optimizer, modified_params)
+        return
     #--------------------------------------------------------------------------------------------------------
     def _train_one_epoch_ref(
         self,
@@ -468,7 +506,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             <= torch.as_tensor(S, device=device).float()
         ).float()
         loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum())}
-        #  import ipdb;ipdb.set_trace()
         # ----------------------------------------------------
         # 5) Loss + GD step
         # ----------------------------------------------------
@@ -744,7 +781,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         #  logits_demos    = torch.stack(demo_logits_list, dim=0)    # [R,N]
         yhat_rollouts   = torch.stack(yhat_list, dim=0)      # [R,N]
         rollout_feats   = torch.stack(feat_list, dim=0)      # [R,K]
-        #  import ipdb;ipdb.set_trace()
 
         # demo fairness matrix
         demo_feats = np.stack([d["fairness_feats"] for d in demos])  # [D,K]

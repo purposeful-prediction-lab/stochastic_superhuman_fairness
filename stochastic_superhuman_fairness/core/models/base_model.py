@@ -148,6 +148,13 @@ class BaseModel(ABC, nn.Module):
             return_logits = True,
         )
     # ----------------------------------------------------------
+    def post_eval(self, *args, **kwargs):
+        pass
+    # ----------------------------------------------------------
+    def post_train(self, *args, **kwargs):
+        pass
+    # ----------------------------------------------------------
+    # ----------------------------------------------------------
     def get_state_dict(self):
         """Return dict of policy/value weights for cross-phase transfer."""
         return {
