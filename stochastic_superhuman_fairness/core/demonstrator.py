@@ -13,7 +13,7 @@ from stochastic_superhuman_fairness.core.fairness.subdominance import subdominan
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict, sample_logistic_model
 from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features
-
+from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling, bj_from_beatrates_nocollapse
 
 class Demonstrator:
     def __init__(self, cfg, auto_create: bool = True, to_torch: bool = True):
@@ -44,9 +44,24 @@ class Demonstrator:
         self.keep_only_requested_fairness_metrics(required_metrics=self.metrics)
         self.compute_demo_ranking()
         self.compute_intrademo_subdom()
+        self.compute_intrademo_ot()
         #  import ipdb;ipdb.set_trace()
 
     
+    # --------------------------------------------------
+    def compute_intrademo_ot(self, alpha: float = None, beta = None):
+        S_OT = self.__dict__[f'train_intrademo_subdom_dict']['S']
+        S_OT += np.eye(*S_OT.shape) * 1e10
+        
+        out = solve_stochastic_subdom_coupling(
+            S_OT,
+            solver=self.cfg.learner.default.train.stochastic.solver,
+            weight_method="primal",
+            normalize_subdom=False,
+            demo_marginals=None,
+            row_constraints=False,
+        )
+        #  import ipdb;ipdb.set_trace()
     # --------------------------------------------------
     def compute_intrademo_subdom(self, alpha: float = None, beta = None):
         '''Default alpha = all ones and beta 0. scalars are repeated to match feature dim K.

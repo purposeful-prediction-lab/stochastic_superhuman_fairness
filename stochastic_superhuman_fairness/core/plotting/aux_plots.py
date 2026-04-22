@@ -602,7 +602,7 @@ def plot_dominance_counts(
     if per_mode is not None:
         ax.text(
             0.01, 0.98,
-            "Stacked bars: per-mode dominant rollouts (counts)",
+            "Stacked bars: per-mode selected rollouts, I[si < Criterion] (counts)",
             transform=ax.transAxes,
             ha="left",
             va="top",

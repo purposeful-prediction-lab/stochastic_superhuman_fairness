@@ -23,11 +23,11 @@ subdominance:
   # type: bayesian  # standard | stochastic
   mode: absolute
   rollout_aggregate: sum
-  alpha: [1.,1.,1.,2.,3.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
+  alpha: [1.,1.,1.,2.,30.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
   beta: 0. # If null defaults to 0
   adaptive_beta: false
   weight_mode: simple # simple, softmax, linear
-  alpha_updates: analytical #analytical, static
+  alpha_updates: static  #analytical, static
 
 # =========================
 # Demonstrator configuration
@@ -54,8 +54,8 @@ demonstrator:
   save_format: "zip" # zip or npy. with npy a separate json metadata file is saved at data folder
   demo_sample: null
   # Set to true to construct diagnostic set with 50% demos 50% RANDOM DECISIONS
-  use_diagnostic_train: True
-  use_diagnostic_eval: True
+  use_diagnostic_train: False
+  use_diagnostic_eval: False
 
 # =========================
 # Learner configuration
@@ -68,13 +68,14 @@ learner:
       train_print_freq: 100
       model_cfg:
         post_eval_transfer: False
+
         # policy_sources: ['random', 'logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
         # policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl']
         # policy_sources: ['logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
         # policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl', 'logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
         policy_sources: ['random']
         policy_mixture: [1.]
-        n_models: 1
+        n_models: 10
         init_noise_std: 0.1
       train:
         lr: 0.003
@@ -107,7 +108,8 @@ learner:
       optimizer: 'adam' # adam, sgd
       stochastic:
         solver: 'mosek'
-        weighted_S_matrix: True
+        weighted_S_matrix: False
+        indicator_func: 'median_intrademo_subdom' # median, mean, NOne, median_intrademo_subdom
         row_constraints: False         # Bool
         col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking
         ot_temperature: 1.0
@@ -116,7 +118,7 @@ learner:
         renormalize_gamma: False
         loss_fn: 'weighted'
         loss_fn_kwargs: #for nested  dict be sure to include them into no_flatten_terms in line 88 base_model.py
-          term_weights: [1., 1.]
+          term_weights: [1., 1]
       bayesian:
         n_rollouts: 256
         dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn

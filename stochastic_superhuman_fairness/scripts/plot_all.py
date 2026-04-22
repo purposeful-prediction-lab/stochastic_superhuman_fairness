@@ -309,7 +309,7 @@ def main():
         mode_colors = mode_palette,
         alpha_rollouts = args.r_opacity,
     )
-    fig = fig2 if args.ref_model is not None else fig
+    fig = fig2 if args.ref_model is  None else fig
     # Save
     out_path = os.path.join(save_dir, args.zero_one_vs_feats_name)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")

@@ -103,6 +103,7 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
     y_demo: torch.Tensor,             # [D,N] demo labels for each demo j
     gamma: torch.Tensor,              # [R,D]
     indicator_win: torch.Tensor,      # [R,D] 1 if S_ij <= Srev_ji else 0
+    rollouts_per_policy: int,
     eps: float = 1e-12,
     normalize_gamma: bool = False,
     term_weights: list = [1., 1.]
@@ -134,7 +135,6 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
         logits_rollouts, yhat_rollouts, reduction="none"
     ).sum(dim=1)  # [R]
 
-    #  import ipdb;ipdb.set_trace()
     w_win_i = (gamma * I ).sum(dim=1)  # [R]
     #  w_win_i = (gamma * I * S_rev).sum(dim=1)  # [R]
     term1 = (w_win_i * bce_roll).sum()
@@ -146,17 +146,18 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
     #   y_demo: [1,D,N]
     logits_ = logits_rollouts[:, None, :]   # [R,1,N]
     ydemo_  = y_demo[None, :, :]            # [1,D,N]
-
     bce_pair = F.binary_cross_entropy_with_logits(
         logits_.expand(R, D, N),
         ydemo_.expand(R, D, N),
         reduction="none",
-    ).sum(dim=2)  # [R,D]
+        ).sum(dim=2)  # [R,D]
 
-    w_lose_ij = gamma * (1.0 - I)           # [R,D]
+    #  import ipdb;ipdb.set_trace()
+    w_lose_ij = (gamma * (1.0 - I))             # [R,D]
+    #w_lose_ij = (gamma * (1.0 - I)).sum(axis=0)   # [D]
     #  w_lose_ij = gamma * (1.0 - I) * S          # [R,D]
     term2 = (w_lose_ij * bce_pair).sum()
-
+    # Add a hinge term as well (sij - S_bar)+ for demo increase and (s_bar-sij)+ for the rollout term
     loss = term_weights[0] * term1 + term_weights[1] * term2
     #  loss = term2
     #  import ipdb;ipdb.set_trace()

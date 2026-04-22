@@ -112,6 +112,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         n_rollouts: int = None,
         decision_threshold: float | None = None,
         solver: str = "mosek",
+        indicator_func: str = None,
         weighted_S_matrix: bool = False,
         row_constraints: bool = False,
         col_constraints: str = None, # None, rev_ranking
@@ -148,7 +149,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         R = P * M
 
         metric_weights = torch.ones(len(self.metrics_list), device=device, dtype=torch.float32)
-
+        # TODO: compute the probability of each policy by summing over all  demos for each policy.
+        # Then sample the row constraints perhaps from those probs.
         logits_per_policy = []
         yhat_per_policy = []
         feat_per_policy = []
@@ -255,19 +257,13 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
 
         S_rev_ji = self.apply_S_temperature(S_demo_roll.T, beta=ot_temperature)  # [R,D]
 
-        win_indicator = (
+        lower_subdom_indicator = (
             torch.as_tensor(S, device=device).float()
             <= torch.as_tensor(S_rev_ji, device=device).float()
         ).float()
-        #  indicator = (S == 0.0).float()
-        #  indicator = (S <= S.mean()).float()
-        #  indicator = (S <= S.median() ).float()
         # Select rollouts whose subdom is less than the weighted subdom of demos.
-        indicator = (S <= demonstrator.train_intrademo_subdom_dict['median']).float()
-        #  indicator = (S <= 0.2).float()
-        #  indicator = (S <= 0.01).float()
-        #  indicator = win_indicator
-        #  import ipdb;ipdb.set_trace()
+        indicator, criterion = self.get_outperforming_rollout_idxs(S, demonstrator, gamma, indicator_func = indicator_func)
+        #  indicator = (S <= demonstrator.train_intrademo_subdom_dict['median']).float()
         indicator_rev = (
             torch.as_tensor(S_rev_ji, device=device).float()
             <= torch.as_tensor(S, device=device).float()
@@ -284,6 +280,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     y_demo,           # [D,N]
                     gamma,            # [R,D]
                     indicator,        # [R,D]
+                    M,                # M rollouts per policy
                     **loss_fn_kwargs,
                 )
         else:
@@ -294,7 +291,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                 gamma=gamma,                      # [R,D]
                 indicator_win=indicator,          # [R,D]
             )
-        loss_term_dict = {'dominant_rollouts': int(win_indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
+        loss_term_dict = {'dominant_rollouts': int(lower_subdom_indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum()),
                           'per_mode_dominant_rollouts': indicator.sum(axis=1).reshape(P, n_rollouts).tolist(),
                           'per_mode_dominant_demos': indicator_rev.sum(axis=1).reshape(P, n_rollouts).tolist(),
                           'S_mean': loss_out.info['S_mean'],'norm_paired_subdom': loss_out.info['norm_paired_subdom'],
@@ -333,7 +330,30 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     "gamma_matrix": gamma,
                 }
 
+    # TODO
+    # Add a large value to the diagonal of the cost subdom for the OT. THen try to see what the matching produces
 
+    #--------------------------------------------------------------------------------------------------------
+    def get_outperforming_rollout_idxs(self, S, demonstrator, gamma, indicator_func = 'median_intrademo_subdom'):
+        ''' Get idxs of well performing rollouts. THese have their likelihood increased by  the loss func
+            The rest (underperforming) are instead ignored and demo likelihood under parameters ins increased.
+        '''
+        is_torch = isinstance(S, torch.Tensor)
+        if indicator_func == 'median_intrademo_subdom':
+            crit = demonstrator.train_intrademo_subdom_dict['median']
+        elif indicator_func == 'median':
+            crit = S.median()
+        elif indicator_func == 'mean':
+            crit = S.mean()
+        elif indicator_func == None:
+            crit = 0.0
+        elif indicator_func == 'match_sum':
+            crit = (gamma * S).sum(axis=1) / (gamma.sum(axis=1) + 1e-5)
+            crit = torch.as_tensor(crit, device=S.device) if is_torch else np.asarray(crit)
+
+        #  import ipdb;ipdb.set_trace()
+        out = (S < crit) if crit.ndim == 0 else (S < crit[:, None])
+        return (out.float() if is_torch else out.astype(float), crit)
     #--------------------------------------------------------------------------------------------------------
     def post_eval(self, eval_stats: dict):
         ''' This function will perform a convex combination with parameter lambda between the best performing
@@ -547,20 +567,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                 }
 
         #----------------------------------------------------------------------------------------------------------
-        #  return {
-        #      "train/loss": float(loss_out.loss.detach().cpu()),
-        #      "train/mean_subdom": float(S.mean()),
-        #      "train/std_subdom": float(S.std()),
-        #      "train/fairness": rollout_feats.mean(dim=0).detach().cpu().tolist(),
-        #      "train/directional_cost": dir_cost,
-        #      "train/ot_temperature": float(ot_temperature),
-        #      "train/indicator_mean": float(indicator.mean().detach().cpu()),
-        #      "train/R": int(R),
-        #      "train/P": int(P),
-        #      "train/D": int(D),
-        #      "train/n_rollouts_per_policy": int(n_rollouts_per_policy),
-        #      "per_policy": per_policy,
-        #  }
 
     def _train_one_epoch_collect(
         self,
@@ -710,169 +716,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             #  "train/n_rollouts_per_policy": int(n_rollouts_per_policy),
             "train/batch_zero_one": float(rb.batch_zero_one_loss),
             #  "per_policy": rb.aux_list[-1]["policy_perf"] if rb.aux_list else {},
-        }
-
-    # -----------------------------------------------------------------------------------------------------------
-
-    def _train_one_epoch_old(
-        self,
-        demonstrator,
-        # Train specific
-        batch_size: int = 1,
-        n_dir: int = 20,
-        n_rollouts: int = None,              # if provided, you can use only first n models
-        decision_threshold: float | None = None,  # (ignored here; we sample stochastically)
-        # OT specific
-        solver: str = "mosek",
-        row_constraints: bool = False,
-        col_constraints: bool = True,
-        ot_temperature: float = 1.0,
-        gamma_temperature: float = 1.0,
-        normalize_s_matrix: bool = True,
-        stochastic_if_threshold: bool = False,    # (ignored here; we sample stochastically)
-        alpha_updates: str = 'analytical',   # analytical, None
-        # Grad update specific
-        no_update: bool = False,
-        use_demos_as_gtruth: bool = False,
-        **kwargs,
-    ):
-        demos = demonstrator.train_demos
-        device = next(self.policies.parameters()).device
-
-        # ---- shared data ----
-        X = demos[0]["X"].to(device)
-        A = demos[0]["A"]
-        A = A.to(device) if torch.is_tensor(A) else A
-        y_true = demos[0]["y"].to(device).view(-1).float()  # ground truth (shared)
-
-        # demo labelings over X (distinct per demo)
-        y_demo = torch.stack(
-            [demonstrator.get_targets(d).to(device).view(-1).float() for d in demos],
-            dim=0
-        )  # [D,N]
-
-        # ---- choose how many rollout-modelsrollouts to use ----
-        policies = self.policies
-        if n_rollouts is not None:
-            policies = policies[: int(n_rollouts)]
-        R = len(policies)
-        D = len(demos)
-
-        # ----------------------------------------------------
-        # 1) Forward each model on shared X -> logits_i -> probs -> sample yhat_i
-        # ----------------------------------------------------
-        logits_list, demo_logits_list = [], []
-        yhat_list = []
-        feat_list = []
-        #  import ipdb;ipdb.set_trace()
-        for pol in policies:
-            logits = pol(X).squeeze(-1)          # [N]
-            probs = torch.sigmoid(logits)         # [N]
-            yhat = sample_binary_from_probs(probs)  # [N] sampled decisions
-
-            logits_list.append(logits)
-            #  demo_logits_list.append(logits)
-            yhat_list.append(yhat)
-            # fairness feats use ground truth
-            f = compute_fairness_features(y_true, yhat, A, self.metrics_list, weights = [1,1,1,1,1])  # [K]
-            feat_list.append(f)
-
-        logits_rollouts = torch.stack(logits_list, dim=0)    # [R,N]
-        #  logits_demos    = torch.stack(demo_logits_list, dim=0)    # [R,N]
-        yhat_rollouts   = torch.stack(yhat_list, dim=0)      # [R,N]
-        rollout_feats   = torch.stack(feat_list, dim=0)      # [R,K]
-
-        # demo fairness matrix
-        demo_feats = np.stack([d["fairness_feats"] for d in demos])  # [D,K]
-        # ----------------------------------------------------
-        # 2) Subdominance matrix S[R,D]
-        # ----------------------------------------------------
-        if alpha_updates == 'analytical':
-            self.compute_alpha(rollout_feats, demonstrator.train_demo_means_sorted, mode = self.subdom_mode, reduce = 'mean')
-        S = compute_subdominance_matrix(
-            rollout_feats,
-            demo_feats,
-            mode=self.subdom_mode,
-            alpha=self.alpha if self.alpha is not None else 1.0,
-            beta=self.beta,
-        )
-
-        #  import ipdb;ipdb.set_trace()
-        # ----------------------------------------------------
-        # 3) Directional cost (diagnostic)
-        # ----------------------------------------------------
-        dir_cost = compute_directional_cost(
-            rollout_feats.detach().cpu().numpy(),
-            demo_feats,
-            n_dir=n_dir,
-        )
-
-        # ----------------------------------------------------
-        # 4) OT solve -> gamma
-        # ----------------------------------------------------
-        if col_constraints == 'rev_ranking':
-            bj_priors = bj_from_beatrates_nocollapse(demonstrator.beat_rates_train)
-        else:
-            bj_priors  = None
-        out = solve_stochastic_subdom_coupling(
-            S,
-            solver=solver,
-            weight_method="primal",
-            normalize_subdom=normalize_s_matrix,
-            demo_marginals = bj_priors,
-            row_constraints=row_constraints,
-            tau = ot_temperature, # Scales subdom matrix before OT computation
-        )
-
-        #  import ipdb;ipdb.set_trace()
-        gamma = gamma_temperature * torch.tensor(out["gamma_np"], device=device, dtype=torch.float32)  # [R,D]
-        #  weights = torch.tensor(gamma.sum(axis=1), device=device, dtype=torch.float32)  # [R]
-
-        # reverse subdom (demo -> rollout), aligned to [R,D]
-        S_demo_roll = compute_subdominance_matrix(
-            demo_feats,
-            rollout_feats.detach(),
-            mode=self.subdom_mode,
-            alpha=self.alpha if self.alpha is not None else 1.0,
-            beta=self.beta,
-        )  # [D,R]
-        S_rev_ji = S_demo_roll.T  # [R,D]
-        S_rev_ji = self.apply_S_temperature(S_rev_ji, beta=ot_temperature)
-
-        indicator = (torch.as_tensor(S, device=device).float() <= torch.as_tensor(S_rev_ji, device=device).float()).float()
-        indicator_rev = (torch.as_tensor(S_rev_ji, device=device).float() <= torch.as_tensor(S, device=device).float()).float()
-
-        loss_term_dict = {'dominant_rollouts': int(indicator.sum().item()), 'dominant_demos': int(indicator_rev.sum())}
-        #  import ipdb;ipdb.set_trace()
-        # ----------------------------------------------------
-        # 5) Loss + GD step
-        # ----------------------------------------------------
-        # THis works when X is shared.
-        loss_out = subdominant_logloss_shared_X_multi_rollout(
-            logits_rollouts=logits_rollouts,  # [R,N]
-            yhat_rollouts=yhat_rollouts,      # [R,N]
-            y_demo=y_demo,                    # [D,N]
-            gamma=gamma,                      # [R,D]
-            indicator_win=indicator,          # [R,D]
-        )
-
-        if not no_update:
-            self.optimizer.zero_grad(set_to_none=True)
-            loss_out.loss.backward()
-            self.optimizer.step()
-
-        #  import ipdb;ipdb.set_trace()
-        return {
-            "train/loss": float(loss_out.loss.detach().cpu()),
-            "train/mean_subdom": float(S.mean()),
-            "train/std_subdom": float(S.std()),
-            "train/fairness": rollout_feats.mean(dim=0).detach().cpu().tolist(),
-            "train/directional_cost": dir_cost,
-            "train/ot_temperature": float(ot_temperature),
-            "train/l_terms": loss_term_dict,
-            "train/indicator_mean": float(indicator.mean().detach().cpu()),
-            "train/R": int(R),
-            "train/D": int(D),
         }
 
     #--------------------------------------------------------------------------------------------------------
