@@ -313,7 +313,55 @@ def sample_actions_from_policy(
         else:
             y_hat = (probs >= decision_threshold).float()
         return (y_hat,) + (logits,)*return_logits + (probs,)*return_probs
+# =============================================================================================================
+# Sample/Population Probabiliy Computation Functions
+# =============================================================================================================
 
+def compute_sample_logprob(logits, labels, reduce="sum"):
+    """
+    Compute the probablity of a sample R given logits and label decisions over populations (D, N)
+    This assumes  logits are shared over sample for each R or  logits are of shape (R, D, N).
+    logits: (R, N) or (R, 1, N)
+    labels: (D, N), (N,), or (1, D, N)
+    returns:  (R,) or (R, D)
+    """
+    logits = torch.as_tensor(logits)
+    labels = torch.as_tensor(labels, device=logits.device, dtype=logits.dtype)
+
+    if logits.ndim == 2:
+        logits = logits[:, None, :]   # (R, 1, N)
+
+    if labels.ndim == 1:
+        labels = labels[None, None, :] # (1, 1, N)
+    elif labels.ndim == 2:
+        labels = labels[None, :, :]    # (1, D, N)
+
+    logits = F.binary_cross_entropy_with_logits(
+        logits.expand(-1, labels.size(1), -1), # broadcasts to (R, D, N)
+        labels.expand(logits.size(0), -1, -1), # broadcasts to (R, D, N)
+        reduction="none"
+    ).sum(dim=-1)  # (R,D), sum along the sample dim N.
+
+    if reduce == "sum":
+        return logits.sum(dim=-1)        # (R)
+    elif reduce == "mean":
+        return logits.mean(dim=-1)       # (R)
+    else:
+        return logits                    # (R, D)
+
+#--------------------------------------------------------------
+
+def compute_sample_distribution(logits, labels, reduce="sum"):
+    """
+    Returns (R,) the total probablity of each sample, normalized to a distribution over the samples
+    For example, R, N sample logits over  D, N population decisions, will yield a distribution
+    D_R = [p_0, p_1, ... p_R]
+    This assumes that each population d in D shares features; otherwise logits must be (R, D, N).
+    """
+    logprobs = compute_sample_logprob(logits, labels, reduce=reduce)
+    return logprobs / logprobs.sum(axis=-1)
+
+#--------------------------------------------------------------
 
 def trajectory_logprob(logits, labels, return_numpy=False, require_grad: bool = False ):
     """
@@ -373,3 +421,79 @@ def trajectory_logprob(logits, labels, return_numpy=False, require_grad: bool = 
             return logprob.detach().cpu().numpy()
 
         return logprob
+
+#--------------------------------------------------------------
+
+def rollout_scores(logits, labels, mode="logprob", reduce="sum", require_grad=True):
+    """
+    logits: (R, N)
+    labels: (R, N)
+    returns: (R,)
+    """
+    ctx = torch.enable_grad() if require_grad else torch.no_grad()
+
+    with ctx:
+        logits = torch.as_tensor(logits)
+        labels = torch.as_tensor(labels, device=logits.device, dtype=logits.dtype)
+
+        if mode in ["logprob", "prob"]:
+            logp = -F.binary_cross_entropy_with_logits(
+                logits, labels, reduction="none"
+            )  # (R,N)
+
+            logp = logp.sum(dim=-1) if reduce == "sum" else logp.mean(dim=-1)
+            return logp if mode == "logprob" else logp.exp()
+
+        elif mode == "01":
+            preds = (logits > 0).to(labels.dtype)
+            acc = (preds == labels).float()
+            return acc.mean(dim=-1) if reduce == "mean" else acc.sum(dim=-1)
+
+        else:
+            raise ValueError(mode)
+
+#--------------------------------------------------------------
+
+def ensemble_scores(
+    logits, labels,
+    mode="logprob",      # "logprob" | "prob" | "01"
+    reduce="sum",
+    require_grad=True,
+    temperature = 1.0,
+    normalize=True,
+):
+    ctx = torch.enable_grad() if require_grad else torch.no_grad()
+
+    if temperature == 0.:
+        print("Temperature 0.0 will lead to div by 0. Setting temperature to 1.0")
+        temperature = 1.
+
+    with ctx:
+        logits = torch.as_tensor(logits)
+        labels = torch.as_tensor(labels, device=logits.device, dtype=logits.dtype)
+
+        logits = logits[:, None, :]      # (M,1,N)
+        labels = labels[None, :, :]      # (1,D,N)
+
+        if mode in ["logprob", "prob"]:
+            logp = -F.binary_cross_entropy_with_logits(
+                logits.expand(-1, labels.size(1), -1),
+                labels.expand(logits.size(0), -1, -1),
+                reduction="none",
+            )  # (M,D,N)
+
+            logp = logp.sum(dim=-1) if reduce == "sum" else logp.mean(dim=-1)  # (M,D)
+
+            #  if normalize:
+            #      # subtract logsumexp over D → stable
+            #      logp = logp - torch.logsumexp(logp, dim=1, keepdim=True)
+
+            return logp if mode == "logprob" else torch.softmax((logp / temperature), dim=1)
+
+        elif mode == "01":
+            preds = (logits > 0).to(labels.dtype)
+            acc = (preds == labels).float()
+            return acc.mean(dim=-1) if reduce == "mean" else acc.sum(dim=-1)
+
+        else:
+            raise ValueError(mode)

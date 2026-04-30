@@ -103,7 +103,7 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
     y_demo: torch.Tensor,             # [D,N] demo labels for each demo j
     gamma: torch.Tensor,              # [R,D]
     indicator_win: torch.Tensor,      # [R,D] 1 if S_ij <= Srev_ji else 0
-    rollouts_per_policy: int,
+    criterion: torch.Tensor,
     eps: float = 1e-12,
     normalize_gamma: bool = False,
     term_weights: list = [1., 1.]
@@ -135,9 +135,13 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
         logits_rollouts, yhat_rollouts, reduction="none"
     ).sum(dim=1)  # [R]
 
-    w_win_i = (gamma * I ).sum(dim=1)  # [R]
-    #  w_win_i = (gamma * I * S_rev).sum(dim=1)  # [R]
-    term1 = (w_win_i * bce_roll).sum()
+    #  w_win_i = (gamma * I ).sum(dim=1)  # [R]
+    #  term1 = (w_win_i * bce_roll).sum()
+    # New advantage like term
+    w_win_ij = gamma * I   # [R, D]
+    l_adv = criterion[:,None] -  S      #[R,D]
+    loss_i =  (l_adv * w_win_ij).sum(axis=1) * bce_roll
+    term1 = (loss_i).sum()
 
     # --- term 2: rollout loses to demo -> fit y_demo_j under logits_i ---
     # BCE for every (i,j): compute BCE(logits_i, y_demo_j) -> [R,D]
@@ -150,25 +154,31 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
         logits_.expand(R, D, N),
         ydemo_.expand(R, D, N),
         reduction="none",
-        ).sum(dim=2)  # [R,D]
+        )  # [R,D, N]
 
     #  import ipdb;ipdb.set_trace()
     w_lose_ij = (gamma * (1.0 - I))             # [R,D]
-    #w_lose_ij = (gamma * (1.0 - I)).sum(axis=0)   # [D]
-    #  w_lose_ij = gamma * (1.0 - I) * S          # [R,D]
-    term2 = (w_lose_ij * bce_pair).sum()
     # Add a hinge term as well (sij - S_bar)+ for demo increase and (s_bar-sij)+ for the rollout term
+    # New advantage like term
+    l_advj = S- criterion[:,None]      #[R,D]
+    loss_j =  (l_advj * w_lose_ij * bce_pair.sum(dim=2)).sum(axis=1)
+    #  term2 = (w_lose_ij * bce_pair).sum()
+    term2 = (loss_j).sum()
+
+    # Total loss
     loss = term_weights[0] * term1 + term_weights[1] * term2
-    #  loss = term2
     #  import ipdb;ipdb.set_trace()
     info = {
-        "w_win_sum": float(w_win_i.sum().detach().cpu()),
+        "w_win_sum": float(w_win_ij.sum().detach().cpu()),
         "w_lose_sum": float(w_lose_ij.sum().detach().cpu()),
         "indicator_mean": float(I.mean().detach().cpu()),
         "term1": float(term1.detach().cpu()),
         "term2": float(term2.detach().cpu()),
+        "term1_activations": I.sum().item(), 
+        "term2_activations": (1-I).sum().item(), 
         'S_mean': S.mean().detach().cpu().item(),
         "norm_paired_subdom":  ((gamma * S).sum()/gamma.sum()).detach().cpu().item(),
+        "paired_subdom":  ((gamma * S).sum()).detach().cpu().item(),
         'demo_logprobs': bce_pair.detach(),
     }
     return SubdomLossOut(loss=loss, info=info)

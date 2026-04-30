@@ -1027,7 +1027,7 @@ def plot_zero_one_vs_features_mode_coupling(
     return fig, axes
 
 
-def plot_zero_one_vs_features_demo_logprobs(
+def plot_zero_one_vs_features_demo_logprobs_from_log(
     rollout_feats,
     demo_feats,
     logs,
@@ -1202,6 +1202,8 @@ def plot_zero_one_vs_features_demo_logprobs(
     #  s_ord = demo_sizes[order]
     #  lab_ord = [demo_text_labels[i] for i in order]
     # ---------- plotting ----------
+
+    import ipdb;ipdb.set_trace()
     for m, Xm in enumerate(modes):
         #  import ipdb;ipdb.set_trace()
         rcolor = mode_colors[m]
@@ -1374,4 +1376,334 @@ def plot_zero_one_vs_features_demo_logprobs(
 
     cbar.set_label("demo logprob", fontsize=9)
     cbar.ax.tick_params(labelsize=8)
+    return fig, axes
+
+def plot_zero_one_vs_features_demo_logprobs(
+    rollout_feats,
+    demo_feats,
+    demo_logprobs,
+    *,
+    ax=None,
+    feature_names=None,
+    title="Zero-one vs Features colored by demo logprob",
+    mode_colors=None,
+    cmap="viridis",
+    logprob_norm="global",  # "per_mode" or "global"
+    rollout_text_labels=None,
+    demo_text_labels=None,
+    fontsize_rollouts=8,
+    fontsize_demos=8,
+    s_rollouts=14,
+    s_means=60,
+    alpha_rollouts=0.35,
+    alpha_demos=0.95,
+    figsize_per_ax=(4.4, 3.6),
+    default_rollout_marker="o",
+    default_demo_marker="x",
+    size_bin_min=20,
+    size_bin_max=120,
+    n_size_bins=10,
+):
+    """
+    For each mode m and feature k in [0, ..., K-2], plot:
+        x = feature_k
+        y = zero_one = feats[:, -1]
+
+    Demos are colored and sized by demo_logprobs under that mode.
+
+    Args:
+        rollout_feats: rollout feature arrays, either one array or list per mode
+        demo_feats: demo feature array, shape (D, K)
+        demo_logprobs: array-like, shape (M, D) or (D,)
+
+    Returns:
+        fig, axes, demo_logprobs_norm
+    """
+
+    # ---------- normalize inputs ----------
+    modes = normalize_rollout_modes(rollout_feats)
+    M = len(modes)
+    K = modes[0].shape[1]
+    K_feat = K - 1
+    y_idx = K - 1
+
+    Df = _to_np(demo_feats)
+    if Df.ndim != 2 or Df.shape[1] != K:
+        raise ValueError(f"demo_feats must have shape (D, {K}), got {Df.shape}")
+
+    D = len(Df)
+
+    demo_logprobs = _to_np(demo_logprobs)
+    if demo_logprobs.ndim == 1:
+        demo_logprobs = demo_logprobs[None, :]
+
+    if demo_logprobs.ndim != 2:
+        raise ValueError(
+            f"demo_logprobs must be 2D with shape (M, D), got {demo_logprobs.shape}"
+        )
+
+    if demo_logprobs.shape != (M, D):
+        raise ValueError(
+            f"demo_logprobs must have shape ({M}, {D}) to match modes x demos, "
+            f"got {demo_logprobs.shape}"
+        )
+
+    if feature_names is None:
+        feature_names = [f"f{i}" for i in range(K_feat)]
+
+    mode_colors = (
+        cycle_palette_colors(M, mode_palette_MAXVAR)
+        if mode_colors is None
+        else mode_colors
+    )
+
+    if len(mode_colors) < M:
+        raise ValueError(f"mode_colors must have length at least {M}")
+
+    rollout_text_labels = (
+        [[None] * len(Xm) for Xm in modes]
+        if rollout_text_labels is None
+        else rollout_text_labels
+    )
+
+    if len(rollout_text_labels) != M:
+        raise ValueError(f"rollout_text_labels must have {M} lists")
+
+    for m, (labs, Xm) in enumerate(zip(rollout_text_labels, modes)):
+        if len(labs) != len(Xm):
+            raise ValueError(
+                f"rollout_text_labels[{m}] must have length {len(Xm)}, got {len(labs)}"
+            )
+
+    demo_text_labels = _resolve_optional_labels(
+        demo_text_labels, D, "demo_text_labels"
+    )
+
+    # ---------- normalize logprobs to [0, 1] ----------
+    if logprob_norm == "global":
+        max_lp = demo_logprobs.max()
+        if max_lp == 0:
+            max_lp = 1e-12
+
+        demo_logprobs_norm = demo_logprobs / max_lp
+        norm = mcolors.Normalize(
+            vmin=demo_logprobs_norm.min(),
+            vmax=demo_logprobs_norm.max(),
+        )
+
+    elif logprob_norm == "per_mode":
+        lo = demo_logprobs.min(axis=1, keepdims=True)
+        hi = demo_logprobs.max(axis=1, keepdims=True)
+        hi = np.where(hi <= lo, lo + 1e-12, hi)
+
+        demo_logprobs_norm = (demo_logprobs - lo) / (hi - lo)
+        norm = None
+
+    else:
+        raise ValueError("logprob_norm must be 'per_mode' or 'global'")
+
+    cmap_obj = cm.get_cmap(cmap)
+
+    # ---------- size bins ----------
+    bin_edges = np.linspace(0.0, 1.0, n_size_bins + 1)
+    size_levels = np.linspace(size_bin_min, size_bin_max, n_size_bins)
+
+    def _sizes_from_probs(p):
+        idx = np.digitize(p, bin_edges[1:-1], right=False)
+        return size_levels[idx]
+
+    # ---------- axes ----------
+    created_fig = False
+
+    if ax is None:
+        fig, axes = plt.subplots(
+            M,
+            K_feat,
+            figsize=(figsize_per_ax[0] * K_feat, figsize_per_ax[1] * M),
+            squeeze=False,
+        )
+        created_fig = True
+    else:
+        axes = np.asarray(ax, dtype=object)
+
+        if M == 1 and K_feat == 1 and axes.ndim == 0:
+            axes = axes.reshape(1, 1)
+        elif M == 1:
+            axes = axes.reshape(1, K_feat)
+        else:
+            axes = axes.reshape(M, K_feat)
+
+        if axes.shape != (M, K_feat):
+            raise ValueError(f"ax must have shape ({M}, {K_feat}), got {axes.shape}")
+
+        fig = axes.flat[0].figure
+
+    demo_mean_handle = Line2D(
+        [0], [0],
+        marker="*",
+        linestyle="None",
+        markersize=max(6, np.sqrt(s_means)),
+        markerfacecolor="cyan",
+        markeredgecolor="cyan",
+        label="Demo mean",
+    )
+
+    # ---------- plotting ----------
+    for m, Xm in enumerate(modes):
+        rcolor = mode_colors[m]
+        p_raw = demo_logprobs[m]
+        p_norm = demo_logprobs_norm[m]
+
+        if logprob_norm == "global":
+            demo_colors = [cmap_obj(v) for v in p_norm]
+        else:
+            demo_colors = [cmap_obj(v) for v in p_norm]
+
+        demo_sizes = _sizes_from_probs(p_norm)
+
+        rollout_mean_handle = Line2D(
+            [0], [0],
+            marker="D",
+            linestyle="None",
+            markersize=max(6, np.sqrt(s_means)),
+            markerfacecolor=rcolor,
+            markeredgecolor=rcolor,
+            label=(
+                f"Mode {m} mean\n"
+                f"Demo norm logprobs μ={p_raw.mean():.2g}, σ={p_raw.std():.2g}"
+            ),
+        )
+
+        for k in range(K_feat):
+            axk = axes[m, k]
+
+            # rollouts for this mode
+            _plot_mixed_text_points(
+                axk,
+                Xm[:, k],
+                Xm[:, y_idx],
+                rollout_text_labels[m],
+                colors=[rcolor] * len(Xm),
+                default_color=rcolor,
+                alpha_text=alpha_rollouts,
+                alpha_marker=alpha_rollouts,
+                fontsize=fontsize_rollouts,
+                marker=default_rollout_marker,
+                s=s_rollouts,
+                zorder_text=4,
+                zorder_marker=2,
+            )
+
+            # demos
+            for xd, yd, lab, cd, sd in zip(
+                Df[:, k],
+                Df[:, y_idx],
+                demo_text_labels,
+                demo_colors,
+                demo_sizes,
+            ):
+                xd = float(xd)
+                yd = float(yd)
+
+                if lab is None:
+                    axk.scatter(
+                        [xd], [yd],
+                        color=cd,
+                        alpha=alpha_demos,
+                        marker=default_demo_marker,
+                        s=float(sd),
+                        zorder=3,
+                    )
+                else:
+                    axk.annotate(
+                        str(lab),
+                        (xd, yd),
+                        xytext=(2, 2),
+                        textcoords="offset points",
+                        ha="left",
+                        va="bottom",
+                        fontsize=fontsize_demos,
+                        color=cd,
+                        alpha=alpha_demos,
+                        clip_on=True,
+                        zorder=5,
+                    )
+
+            # means
+            rx = float(Xm[:, k].mean())
+            ry = float(Xm[:, y_idx].mean())
+            dx = float(Df[:, k].mean())
+            dy = float(Df[:, y_idx].mean())
+
+            axk.scatter(rx, ry, s=s_means, marker="D", color=rcolor, zorder=7)
+            axk.scatter(dx, dy, s=s_means, marker="*", color="cyan", zorder=7)
+
+            axk.set_title(
+                feature_names[k],
+                loc="center",
+                color=rcolor,
+                fontweight="bold",
+                fontsize=11,
+            )
+
+            axk.text(
+                0.5,
+                1.00,
+                f"logprob ∈ [{p_raw.min():.3g}, {p_raw.max():.3g}]",
+                transform=axk.transAxes,
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color=rcolor,
+            )
+
+            axk.set_xlabel(feature_names[k])
+            if k == 0:
+                axk.set_ylabel("zero_one")
+
+            _apply_limits_from_data(
+                axk,
+                x_arrays=[Xm[:, k], Df[:, k]],
+                y_arrays=[Xm[:, y_idx], Df[:, y_idx]],
+                pad_frac=0.05,
+            )
+
+            axk.grid(True, alpha=0.2)
+            axk.axhline(0.0, color="0.7", lw=0.8, zorder=0)
+            axk.axvline(0.0, color="0.7", lw=0.8, zorder=0)
+
+            axk.legend(
+                handles=[rollout_mean_handle, demo_mean_handle],
+                loc="best",
+                fontsize=8,
+                frameon=True,
+            )
+
+    if created_fig and title is not None:
+        fig.suptitle(title, y=0.995)
+        fig.tight_layout()
+
+    # ---------- shared colorbar ----------
+    from matplotlib.cm import ScalarMappable
+
+    if logprob_norm == "global":
+        sm = ScalarMappable(norm=norm, cmap=cmap_obj)
+    else:
+        sm = ScalarMappable(
+            norm=mcolors.Normalize(vmin=0.0, vmax=1.0),
+            cmap=cmap_obj,
+        )
+
+    sm.set_array([])
+
+    cbar = fig.colorbar(
+        sm,
+        ax=axes.ravel().tolist(),
+        fraction=0.015,
+        pad=0.02,
+    )
+
+    cbar.set_label("demo logprob", fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
+
     return fig, axes

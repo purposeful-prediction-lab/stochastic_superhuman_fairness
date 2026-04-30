@@ -92,7 +92,7 @@ class Learner:
             # Phase training loop
             # ----------------------
             for ep in range(epochs):
-                stats_train = self.model.train_one_epoch(self.demo, subdom_type = subdom_type, **train_cfg)
+                stats_train = self.model.train_one_epoch(self.demo, subdom_type = subdom_type, epoch = ep, **train_cfg)
                 stats_train.update({
                     "epoch": ep,
                     "phase": phase_idx,

@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import math
 import torch
 from stochastic_superhuman_fairness.core.plotting.plot_utils import  (
         _add_row_group_colors_to_heatmap, _to_np,
@@ -431,50 +432,24 @@ def save_heatmap(
     plt.savefig(filename, dpi=300)
     plt.close()
 
+
 def plot_dominance_counts(
     logs,
     *,
+    ax=None,                 # <-- NEW
     title="Dominance counts per epoch",
     figsize=(9, 4),
-    per_mode=None,          # None | key path str | list aligned with logs
-    x_timesteps=None,       # list of epoch indices at which to draw per-mode bars
-    palette=None,           # list of colors, one per mode
+    per_mode=None,
+    x_timesteps=None,
+    palette=None,
     annotate_per_mode: bool = False,
     bar_width=10.35,
     bar_alpha=0.45,
 ):
     """
-    Plot dominant_rollouts and dominant_demos over epochs.
-
-    Optionally overlay stacked vertical bars at selected x_timesteps, where each
-    cell is the corresponding value of per-mode dominant rollouts at that epoch.
-
-    The first mode is the TOPMOST cell, colored with palette[0], second with
-    palette[1], etc.
-
-    Parameters
-    ----------
-    logs : list[dict]
-        Output of load_metrics_jsonl(log_dir), one dict per epoch.
-
-    per_mode : None | str | list
-        If not None:
-          - str: key path to read from each log entry, e.g.
-                 "train/lterms/per_mode_dominant_rollouts"
-          - list: already extracted per-epoch values aligned with logs
-                  each entry should be a sequence of mode counts
-
-    x_timesteps : list[int] | None
-        Epoch indices at which to draw the stacked per-mode bars.
-        Defaults to all plotted epochs if per_mode is provided.
-
-    palette : list[str] | None
-        Colors for modes. If None, matplotlib tab10 is used.
-
-    Returns
-    -------
-    fig, ax
+    Same as before, but can plot into a provided axis.
     """
+
     def _get_nested_mixed(d, path, default=None):
         if not isinstance(d, dict):
             return default
@@ -489,7 +464,6 @@ def plot_dominance_counts(
                 return default
 
             found = False
-            # try longest possible slash-joined key first
             for j in range(len(parts), i, -1):
                 key = "/".join(parts[i:j])
                 if key in cur:
@@ -514,17 +488,25 @@ def plot_dominance_counts(
         dom_demos.append(ltd["dominant_demos"])
 
     if not epochs:
-        raise ValueError("No log entries with loss_term_dict dominant counts were found.")
+        raise ValueError("No log entries with dominant counts found.")
 
     dom_rollouts = np.asarray(dom_rollouts, dtype=float)
     dom_demos = np.asarray(dom_demos, dtype=float)
     epochs = np.asarray(epochs, dtype=int)
 
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.plot(epochs, dom_demos, label="dominant_demos")
-    ax.plot(epochs, dom_rollouts,  label="dominant_rollouts")
+    # ---------- axis handling ----------
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
 
-    # Optional per-mode stacked bars
+    # ---------- main lines ----------
+    ax.plot(epochs, dom_demos, label="dominant_demos")
+    ax.plot(epochs, dom_rollouts, label="dominant_rollouts")
+
+    # ---------- per-mode bars ----------
     if per_mode is not None:
         if isinstance(per_mode, str):
             per_mode_vals = [_get_nested_mixed(log, per_mode, None) for log in logs]
@@ -532,86 +514,94 @@ def plot_dominance_counts(
             per_mode_vals = per_mode
 
         if len(per_mode_vals) != len(logs):
-            raise ValueError("per_mode must be aligned with logs (same length).")
+            raise ValueError("per_mode must align with logs.")
 
         if x_timesteps is None:
             x_timesteps = epochs.tolist()
 
-        # infer number of modes from first available entry
         first_valid = next((v for v in per_mode_vals if v is not None), None)
         if first_valid is None:
-            raise ValueError("per_mode was provided, but no valid entries were found.")
+            raise ValueError("per_mode provided but no valid entries.")
 
         n_modes = len(first_valid)
+        #  import ipdb;ipdb.set_trace()
         if palette is None:
             cmap = plt.cm.get_cmap("tab10", n_modes)
             palette = [cmap(i) for i in range(n_modes)]
+
         if len(palette) < n_modes:
             raise ValueError(f"palette must have at least {n_modes} colors.")
 
-        
-    for x in x_timesteps:
-        if x < 0 or x >= len(per_mode_vals) or per_mode_vals[x] is None:
-            continue
+        for x in x_timesteps:
+            if x < 0 or x >= len(per_mode_vals) or per_mode_vals[x] is None:
+                continue
 
-        vals = np.asarray(per_mode_vals[x], dtype=float)
-        if vals.shape[0] != n_modes:
-            import ipdb;ipdb.set_trace()
+            vals = np.asarray(per_mode_vals[x], dtype=float)
 
-            raise ValueError(
-                f"Inconsistent per_mode size at timestep {x}: "
-                f"expected {n_modes}, got {vals.size}."
-            )
-
-        bottom = 0.0
-
-        # draw bottom → top so that mode 0 appears at the top
-        for mode_idx in reversed(range(n_modes)):
-            h = vals[mode_idx].sum()
-
-            ax.bar(
-                x,
-                h,
-                width=bar_width,
-                bottom=bottom,
-                color=palette[mode_idx],
-                alpha=bar_alpha,
-                align="center",
-                edgecolor="none",
-                zorder=0,
-            )
-
-            if annotate_per_mode:
-                # ---- annotate the cell ----
-                ax.text(
-                    x,
-                    bottom + h / 2,
-                    f"{int(h)}",
-                    ha="center",
-                    va="center",
-                    fontsize=5,
-                    color="black",
-                    zorder=5,
+            if vals.shape[0] != n_modes:
+                raise ValueError(
+                    f"Inconsistent per_mode size at timestep {x}: "
+                    f"expected {n_modes}, got {vals.size}."
                 )
 
-            bottom += h
+            bottom = 0.0
+
+            # reverse so mode 0 is top
+            for mode_idx in reversed(range(n_modes)):
+                h = sum(vals[mode_idx])
+
+                ax.bar(
+                    x,
+                    h,
+                    width=bar_width,
+                    bottom=bottom,
+                    color=palette[mode_idx],
+                    alpha=bar_alpha,
+                    align="center",
+                    edgecolor="none",
+                    zorder=0,
+                )
+
+                if annotate_per_mode:
+                    ax.text(
+                        x,
+                        bottom + h / 2,
+                        f"{int(h)}",
+                        ha="center",
+                        va="center",
+                        fontsize=5,
+                        color="black",
+                        zorder=5,
+                    )
+
+                bottom += h
+
+    # ---------- labels ----------
     ax.set_xlabel("epoch")
     ax.set_ylabel("count")
     ax.set_title(title)
     ax.legend()
+
     if per_mode is not None:
         ax.text(
             0.01, 0.98,
-            "Stacked bars: per-mode selected rollouts, I[si < Criterion] (counts)",
+            "Stacked bars: per-mode selected rollouts",
             transform=ax.transAxes,
             ha="left",
             va="top",
             fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", alpha=0.8, edgecolor="none"),
+            bbox=dict(
+                boxstyle="round,pad=0.25",
+                facecolor="white",
+                alpha=0.8,
+                edgecolor="none",
+            ),
         )
-    fig.tight_layout()
-    return fig, ax
 
+    if created_fig:
+        fig.tight_layout()
+
+    return fig, ax
 def plot_paired_subdominance_curve(
     logs,
     *,
@@ -635,18 +625,19 @@ def plot_paired_subdominance_curve(
     """
     epochs, s_mean, norm_paired, ratio = [], [], [], []
 
+    pair_key = "paired_subdom" # was norm_paired_subdom before 560
     for i, log in enumerate(logs):
         ltd = log.get("train/l_terms", {})
-        if "S_mean" not in ltd or "norm_paired_subdom" not in ltd:
+        if "S_mean" not in ltd or pair_key not in ltd:
             continue
         s = float(ltd["S_mean"])
-        n = float(ltd["norm_paired_subdom"])
+        n = float(ltd[pair_key])
         epochs.append(i)
         s_mean.append(s)
         norm_paired.append(n)
         ratio.append(n / s if abs(s) > 1e-12 else np.nan)
     if not epochs:
-        raise ValueError("No log entries with 'S_mean' and 'norm_paired_subdom' were found.")
+        raise ValueError(f"No log entries with 'S_mean' and {pair_key} were found.")
 
     epochs = np.asarray(epochs)
     s_mean = np.asarray(s_mean)
@@ -659,9 +650,9 @@ def plot_paired_subdominance_curve(
         fig = ax.figure
 
     ax_right = ax_left.twinx()
-    l1 = ax_left.plot(epochs, s_mean, label="S_mean")
-    l2 = ax_left.plot(epochs, norm_paired, label="norm_paired_subdom")
-    l3 = ax_right.plot(epochs, ratio, color = 'red', linestyle="--", label="norm_paired_subdom / S_mean")
+    l1 = ax_left.plot(epochs, s_mean, color = 'red', label="S_mean")
+    l2 = ax_left.plot(epochs, norm_paired, color = 'navy', label=f"pair_key/ OT loss")
+    l3 = ax_right.plot(epochs, ratio, color = 'violet', linestyle="--", label=f"{pair_key} / S_mean")
 
     ax_left.set_xlabel("epoch")
     ax_left.set_ylabel("value")
@@ -680,8 +671,6 @@ def plot_paired_subdominance_curve(
     return fig, (ax_left, ax_right)
 
 #----------------------------------------------------------------------------------------------------
-import math
-import matplotlib.pyplot as plt
 
 
 def _format_cfg(obj, indent=0):
@@ -752,4 +741,101 @@ def plot_cfg_string(cfg, *, ax=None, title="Configuration", fontsize=10, line_he
     )
 
     fig.tight_layout()
+    return fig, ax
+
+
+def plot_policy_probs(
+    logs,
+    *,
+    ax=None,                 # <-- NEW
+    title="Policy probabilities per epoch",
+    figsize=(9, 4),
+    palette=None,
+    annotate_final: bool = True,
+    linewidth=2.0,
+    alpha=0.9,
+    marker=None,
+):
+    """
+    Plot policy probabilities over epochs.
+
+    If ax is None -> creates figure
+    else -> plots into provided axis
+    """
+
+    epochs = []
+    probs = []
+
+    for i, log in enumerate(logs):
+        p = log.get("train/policy_probs", None)
+        if p is None:
+            continue
+
+        p = np.asarray(p, dtype=float)
+
+        if p.ndim != 1:
+            raise ValueError(f"Expected policy_probs to be 1D, got shape {p.shape} at log {i}")
+
+        epochs.append(i)
+        probs.append(p)
+
+    if len(probs) == 0:
+        raise ValueError("No entries found for log['train/policy_probs'].")
+
+    probs = np.stack(probs, axis=0)  # (T, P)
+    epochs = np.asarray(epochs)
+
+    T, P = probs.shape
+
+    if palette is None:
+        palette = [f"C{i}" for i in range(P)]
+
+    # ---------- axis handling ----------
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    # ---------- plotting ----------
+    for p_idx in range(P):
+        ax.plot(
+            epochs,
+            probs[:, p_idx],
+            label=f"policy {p_idx}",
+            color=palette[p_idx],
+            linewidth=linewidth,
+            alpha=alpha,
+            marker=marker,
+        )
+
+        if annotate_final:
+            ax.text(
+                epochs[-1],
+                probs[-1, p_idx],
+                f"{probs[-1, p_idx]:.3f}",
+                color=palette[p_idx],
+                fontsize=8,
+                va="center",
+                ha="left",
+            )
+
+    ax.set_title(title)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("policy probability")
+    ax.grid(True, alpha=0.25)
+
+    # avoid duplicate legends if reusing axis
+    handles, labels = ax.get_legend_handles_labels()
+    if len(handles) > 0:
+        ax.legend(fontsize=8, frameon=True)
+
+    ymin = min(0.0, float(probs.min()))
+    ymax = max(1.0, float(probs.max()))
+    ax.set_ylim(ymin, ymax * 1.05)
+
+    if created_fig:
+        fig.tight_layout()
+
     return fig, ax

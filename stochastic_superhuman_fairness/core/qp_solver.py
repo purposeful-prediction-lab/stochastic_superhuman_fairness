@@ -554,6 +554,100 @@ def _solve_sinkhorn_core_ref(
         print(f"γ row-sum std: {rs.std():.3e}, col-sum std: {cs.std():.3e}")
 
     return gamma, dual_rows, dual_cols
+
+
+def _solve_mip_mosek_cover_core(
+    subdom_matrix,
+    demo_requirements=None,      # q_j: min rollouts per demo
+    normalize_subdom=False,
+    tau=1.0,
+    selection_reward=0.0,        # lambda: encourages using extra good rollouts
+    verbose=True,
+):
+    """
+    Binary covering assignment:
+        x_ij in {0,1}
+        min sum_ij (C_ij - selection_reward) x_ij
+        s.t. sum_i x_ij >= q_j      every demo covered
+             sum_j x_ij <= 1        each rollout used at most once
+    """
+    S = np.asarray(subdom_matrix, dtype=float)
+    R, D = S.shape
+    n = R * D
+
+    if normalize_subdom:
+        S = minmax_normalize(S)
+    if tau != 1.0:
+        S = S * tau
+
+    if demo_requirements is None:
+        q = np.ones(D, dtype=float)
+    else:
+        q = np.asarray(demo_requirements, dtype=float).reshape(-1)
+        if q.size != D:
+            raise ValueError(f"demo_requirements length {q.size} != num_demos {D}")
+
+    if q.sum() > R:
+        raise ValueError(f"Infeasible: demo requirements sum to {q.sum()} but only {R} rollouts exist.")
+
+    c = (S - selection_reward).reshape(-1)
+
+    with mosek.Env() as env, env.Task(0, 0) as task:
+        task.putobjsense(mosek.objsense.minimize)
+
+        task.appendvars(n)
+
+        # x_ij binary
+        task.putvarboundslice(
+            0, n,
+            [mosek.boundkey.ra] * n,
+            [0.0] * n,
+            [1.0] * n,
+        )
+        for k in range(n):
+            task.putvartype(k, mosek.variabletype.type_int)
+
+        task.putcslice(0, n, c)
+
+        con = 0
+
+        # each rollout used at most once: sum_j x_ij <= 1
+        task.appendcons(R)
+        for i in range(R):
+            idx = [i * D + j for j in range(D)]
+            task.putarow(con + i, idx, [1.0] * D)
+            task.putconbound(con + i, mosek.boundkey.up, -np.inf, 1.0)
+        con += R
+
+        # each demo covered: sum_i x_ij >= q_j
+        task.appendcons(D)
+        for j in range(D):
+            idx = [i * D + j for i in range(R)]
+            task.putarow(con + j, idx, [1.0] * R)
+            task.putconbound(con + j, mosek.boundkey.lo, float(q[j]), np.inf)
+        con += D
+
+        task.optimize()
+
+        solsta = task.getsolsta(mosek.soltype.itg)
+        if solsta not in (mosek.solsta.integer_optimal, mosek.solsta.prim_feas):
+            raise RuntimeError(f"[MOSEK-MIP] optimization failed: {solsta}")
+
+        x = np.zeros(n)
+        task.getxx(mosek.soltype.itg, x)
+
+    gamma = x.reshape(R, D)
+    gamma = (gamma > 0.5).astype(float)
+
+    dual_rows = np.zeros(R)
+    dual_cols = np.zeros(D)
+
+    if verbose:
+        print(f"[MOSEK-MIP] selected rollouts: {int(gamma.sum(axis=1).sum())}/{R}")
+        print(f"[MOSEK-MIP] row sums min/max: {gamma.sum(axis=1).min()} / {gamma.sum(axis=1).max()}")
+        print(f"[MOSEK-MIP] col sums min/max: {gamma.sum(axis=0).min()} / {gamma.sum(axis=0).max()}")
+
+    return gamma, dual_rows, dual_cols
 # ============================================================
 # 🔹 Unified entry point  (samples × demos)
 # ============================================================
@@ -596,6 +690,15 @@ def solve_qp_superhuman(
             epsilon=epsilon,
             col_constraints = col_constraints,
             row_constraints = row_constraints,
+            verbose=verbose,
+        )
+    elif solver == "mip_mosek": # this handles the set cover case.
+        return _solve_mip_mosek_cover_core(
+            subdom_matrix=subdom_matrix,
+            demo_requirements=demo_marginals,   # here interpreted as integer requirements, not probabilities
+            normalize_subdom=normalize_subdom,
+            tau=tau,
+            selection_reward=0.0 if lambda_reg is None else lambda_reg,
             verbose=verbose,
         )
     else:

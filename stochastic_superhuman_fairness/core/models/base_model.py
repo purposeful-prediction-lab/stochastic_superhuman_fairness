@@ -528,3 +528,64 @@ class BaseModel(ABC, nn.Module):
             raise RuntimeError(f"Internal error: created {len(out)} policies, expected {n_total_policies}.")
 
         return nn.ModuleList(out)
+
+    def compute_policy_probability(self, per_policy_rollout_logits: torch,Tensor)->torch.Tensor:
+        p_probs = per_policy_rollout_logits.sum(axis=1)
+        p_probs /= per_policy_rollout_logits.sum()
+        return p_probs
+
+    def ensemble_logits_on_rollouts(
+        self,
+        X,
+        labels=None,
+        *,
+        device=None,
+        require_grad=True,
+    ):
+        """
+        X:      (N, F) or (R, N, F) or (M, R, N, F)
+        labels: optional, (R, N) or (M, R, N), only used to infer R
+        returns logits: (M, R, N)
+        """
+
+        device = device or next(self.parameters()).device
+        X = X.to(device)
+
+        M = len(self.policies)
+
+        # infer R
+        if X.ndim == 2:
+            R = labels.shape[-2] if labels is not None and labels.ndim >= 2 else 1
+            X_in = X                                  # shared X: (N,F)
+        elif X.ndim == 3:
+            R = X.shape[0]
+            X_in = X                                  # (R,N,F)
+        elif X.ndim == 4:
+            R = X.shape[1]
+            X_in = X                                  # (M,R,N,F)
+        else:
+            raise ValueError(f"Bad X shape: {X.shape}")
+
+        ctx = torch.enable_grad() if require_grad else torch.no_grad()
+
+        outs = []
+        with ctx:
+            for m, pol in enumerate(self.policies):
+                if X.ndim == 2:
+                    logits = pol(X_in).squeeze(-1)          # (N,)
+                    logits = logits[None, :].expand(R, -1)  # (R,N)
+
+                elif X.ndim == 3:
+                    R_, N, F = X_in.shape
+                    logits = pol(X_in.reshape(R_ * N, F)).squeeze(-1)
+                    logits = logits.reshape(R_, N)          # (R,N)
+
+                else:  # X.ndim == 4
+                    X_m = X_in[m]                           # (R,N,F)
+                    R_, N, F = X_m.shape
+                    logits = pol(X_m.reshape(R_ * N, F)).squeeze(-1)
+                    logits = logits.reshape(R_, N)          # (R,N)
+
+                outs.append(logits)
+
+        return torch.stack(outs, dim=0).to(device)           # (M,R,N)

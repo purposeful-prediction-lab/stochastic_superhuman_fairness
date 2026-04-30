@@ -2,12 +2,16 @@ import argparse
 import os
 import random
 import numpy as np
+import torch
 import matplotlib.pyplot as plt
 
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling
 from stochastic_superhuman_fairness.core.models.model_io_utils import load_model_from_archive
 from stochastic_superhuman_fairness.core.utils_io import load_metrics_jsonl, classify_arg, get_base_path, split_path, save_dict_text
-from stochastic_superhuman_fairness.core.utils import trajectory_logprob
+from stochastic_superhuman_fairness.core.utils import trajectory_logprob, ensemble_scores
+from stochastic_superhuman_fairness.core.plotting.demonstration_plots import(
+        plot_label_agreement_stats
+        )
 from stochastic_superhuman_fairness.core.plotting.rollout_plots import(
         plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features,
         plot_zero_one_vs_features_mode_coupling, 
@@ -22,11 +26,36 @@ from stochastic_superhuman_fairness.core.plotting.aux_plots import (
         plot_ot_solution_heatmaps, plot_indicator_matrix,
         plot_dominance_counts,
         plot_cfg_string,
+        plot_policy_probs,
         )
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
     compute_subdominance_matrix,
     compute_subdominance_matrix_grouped,
 )
+
+def compute_intrademo_scale(logs: list) -> float:
+    """
+    Scale demo baseline loss to match rollout loss magnitude.
+
+    Assumes losses are SUM-reduced over samples.
+
+    Args:
+        logs (list)
+
+    Returns:
+        scale factor
+    """
+
+    for l in logs:
+        valid_log = l.get("train/R", None)
+        if valid_log is not None:
+            num_rollouts = l['train/R']
+            num_demos = l['train/D']
+            break
+    if num_demos == 0:
+        #  raise ValueError("num_demos must be > 0")
+        return 1.
+    return num_rollouts / num_demos
 
 def _parse_pairs(s: str):
     """
@@ -75,6 +104,7 @@ def main():
     ap.add_argument("--save_plot_dir", default=None, help="If set, save plot here; otherwise saves next to archive.")
     ap.add_argument("--feat_vs_feats_name", default="all_features_vs_features.png")
     ap.add_argument("--zero_one_vs_feats_name", default="zero_one_vs_features.png")
+    ap.add_argument("--plot_freq", type=int, default=1, help="Plot frequency for all the x vs epoch plots.")
     ap.add_argument("--losses_name", default="losses.png")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--r_opacity", type=float, default=.35)
@@ -132,7 +162,8 @@ def main():
 
     if demos_all is None or len(demos_all) == 0:
         raise RuntimeError(f"No demos found for split={args.split}")
-    demo_labels = [d['y'] for d in demos_all]
+    g_truth_labels = [d['y'] for d in demos_all]
+    demo_labels = [d['y_demo'] for d in demos_all]
     per_policy_rollouts = args.per_policy_rollouts if args.per_policy_rollouts is not None else 10
     demos_sel = _choose_demos(demos_all, n=len(demos_all), seed=args.seed)
     pcfg = cfg.phase_cfg
@@ -147,7 +178,6 @@ def main():
         )
         rollout_feats = rb.feats.detach().cpu().numpy()
     else:
-        # Deterministic fallback: use the base collector if you exposed it, else minimal inline.
         rbs = []
         if hasattr(model, "collect_eval_rollouts"):
             models = [model]
@@ -385,7 +415,9 @@ def main():
     log_dir = os.path.join(os.path.dirname(os.path.abspath(args.archive)), '..', 'metrics_log.jsonl')
     logs = load_metrics_jsonl(log_dir)
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    fig, ax = plot_loss_and_subdom(logs,ax=axes[0])
+    scale = compute_intrademo_scale(logs)
+    fig, ax = plot_loss_and_subdom(logs,ax=axes[0], intrademo_scale = scale,  log_loss_scale = True,
+                                   plot_freq=args.plot_freq)
     #  try:
     fig, ax = plot_paired_subdominance_curve(logs, ax = axes[1])
     #  except:
@@ -397,15 +429,19 @@ def main():
     plt.close(fig)
     # Plot Demo Log Probs
     # =====================================================================================
+    logits = np.array(rb.logits[::per_policy_rollouts])
+    demo_logprobs = ensemble_scores(logits, torch.stack(demo_labels), mode = 'prob', temperature  = 10., require_grad = False)
+    #  import ipdb;ipdb.set_trace()
     fig, ax = plot_zero_one_vs_features_demo_logprobs(
                     feats_by_mode,
                     demo_feats,
-                    logs,
+                    demo_logprobs,
                     #  ax = axes[1],
                     feature_names=feature_names,
                     title = f"{model_name} Demo log Probablity",
                     mode_colors = mode_palette,
                     alpha_rollouts = args.r_opacity,
+                    logprob_norm = 'per_mode',
                 )
     # Save
     out_path = os.path.join(save_dir, "demo_logprobs.png")
@@ -415,12 +451,25 @@ def main():
 
     # Plot Loss Term Activations
     # =====================================================================================
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig, _ = plot_dominance_counts(
         logs,
+        ax = axes[0],
         per_mode="train/l_terms/per_mode_dominant_rollouts",
+        title = 'Dominance and Rollout Indicator Counts per epoch',
         x_timesteps= [i for i in range(0, len(logs), 40)],
         palette= mode_palette,
     )
+    #  try:
+    fig, _ = plot_policy_probs(
+        logs,
+        ax=axes[1],
+        title = 'Dominance and Rollout Indicator Counts per epoch',
+        palette= mode_palette,
+    )
+    #  except:
+        #  print("No policy probs found")
     # Save
     out_path = os.path.join(save_dir, "loss_term_activation_counts.png")
     print(f'Saving loss_term_activation_counts.png to {out_path}')
@@ -437,6 +486,18 @@ def main():
     print(f'Saving configs.txt to {out_path}')
     #  fig.savefig(out_path, dpi=200, bbox_inches="tight")
     #  plt.close(fig)
+
+    # Plot Demonstration Info
+    # =====================================================================================
+    # Save
+    # This segment requires a 2x2 grid
+    fig, axes = plt.subplots(2, 2, figsize=(12, 5))
+    out_path = os.path.join(save_dir, "demos_info.png")
+    print(f'Saving demonstration info plot to {out_path}')
+    fig, _ = plot_label_agreement_stats(demo.label_agreement_dict, axes = (axes[0,0], axes[0,1]))
+    fig, _ = plot_label_agreement_stats(demo.label_agreement_dict, axes = (axes[1,0], axes[1,1]), split = 'eval')
+    fig.savefig(out_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 if __name__ == "__main__":

@@ -10,12 +10,13 @@ from stochastic_superhuman_fairness.core.dataset_utils import load_adult, load_c
 from stochastic_superhuman_fairness.core.data_defaults import DEFAULT_DATA_CONFIGS
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC_REGISTRY, zero_one_loss, compute_fairness_features
 from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features, compute_beat_rates
+from stochastic_superhuman_fairness.core.demonstrator_utils import AgreementStatsMixin
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict, sample_logistic_model
 from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling, bj_from_beatrates_nocollapse
 
-class Demonstrator:
+class Demonstrator(AgreementStatsMixin):
     def __init__(self, cfg, auto_create: bool = True, to_torch: bool = True):
         self.cfg = normalize_cfg(cfg)
         self.dcfg = self.cfg.get('demonstrator')
@@ -41,15 +42,33 @@ class Demonstrator:
         if auto_create:
             self.create_demos(to_torch = self.to_torch_flag)
             self._compute_standalone_demofeats()
+            self._compute_standalone_demolabels()
         self.keep_only_requested_fairness_metrics(required_metrics=self.metrics)
+        #  import ipdb;ipdb.set_trace()
         self.compute_demo_ranking()
         self.compute_intrademo_subdom()
         self.compute_intrademo_ot()
-        #  import ipdb;ipdb.set_trace()
+        self.compute_label_agreement_dict()
 
     
     # --------------------------------------------------
-    def compute_intrademo_ot(self, alpha: float = None, beta = None):
+    def compute_label_agreement_dict(self,  
+        return_disagreement_per_sample: bool = False,
+        exclude_self: bool = True,
+        ):
+        kwargs = {'return_disagreement_per_sample': return_disagreement_per_sample,
+                  'exclude_self': exclude_self,
+                  }
+        self.label_agreement_dict = {}
+        self.label_agreement_dict['train'] = self.compute_label_agreement(self.train_demo_labels[self.demo_ranking_train], **kwargs)
+        self.label_agreement_dict['eval'] = self.compute_label_agreement(self.eval_demo_labels[self.demo_ranking_eval], **kwargs)
+        self.label_agreement_dict['train']['pairwise_agreement_sorted'] = self.label_agreement_dict['train'].pop('pairwise_agreement') 
+        self.label_agreement_dict['eval']['pairwise_agreement_sorted'] = self.label_agreement_dict['eval'].pop('pairwise_agreement') 
+        self.label_agreement_dict['train']['pairwise_agreement'] = self.compute_label_agreement(self.train_demo_labels[self.demo_ranking_train], **kwargs)['pairwise_agreement']
+        self.label_agreement_dict['eval']['pairwise_agreement'] = self.compute_label_agreement(self.eval_demo_labels[self.demo_ranking_eval], **kwargs)['pairwise_agreement']
+
+    def compute_intrademo_ot(self, alpha: float = None, beta = None, to_torch = True):
+        device = 'cpu' if to_torch is False else 'cuda'
         S_OT = self.__dict__[f'train_intrademo_subdom_dict']['S']
         S_OT += np.eye(*S_OT.shape) * 1e10
         
@@ -61,16 +80,21 @@ class Demonstrator:
             demo_marginals=None,
             row_constraints=False,
         )
+        self.intrademo_ot_dict = out
+        self.intrademo_gamma = out['gamma_np']
+        self.intrademo_gamma_torch = torch.tensor(out['gamma_np']).to(device)
         #  import ipdb;ipdb.set_trace()
     # --------------------------------------------------
-    def compute_intrademo_subdom(self, alpha: float = None, beta = None):
+    def compute_intrademo_subdom(self, alpha: float = None, beta = None, to_torch = True):
         '''Default alpha = all ones and beta 0. scalars are repeated to match feature dim K.
            Per rollout reduction is mean.
         '''
         keys = ['train', 'eval']
+        device = 'cpu' if to_torch is False else 'cuda'
         for key in keys:
             feats = self.__dict__[f'{key}_demo_feats'] 
             self.__dict__[f'{key}_intrademo_subdom_dict'] = subdominance_loss_from_features(feats, feats)
+            self.__dict__[f'{key}_intrademo_S_torch'] =  torch.tensor(self.__dict__[f'{key}_intrademo_subdom_dict']['S']).to(device)
             self.__dict__[f'{key}_intrademo_subdom_dict']['median'] = np.median(
                     self.__dict__[f'{key}_intrademo_subdom_dict']['per_rollout'])
             self.__dict__[f'{key}_intrademo_mean_subdom'] = self.__dict__[f'{key}_intrademo_subdom_dict']['per_rollout'].mean()
@@ -82,6 +106,9 @@ class Demonstrator:
     #          int_k = int(k*len(self.train_demo_feats))
     #      elif k >  self.num_demos_train:
     #          int_k = self.num_demos_train
+    def _compute_standalone_demolabels(self):
+        self.train_demo_labels = torch.stack([d["y_demo"] for d in self.train_demos])  # [D,K]      
+        self.eval_demo_labels = torch.stack([d["y_demo"] for d in self.eval_demos])  # [D,K]      
 
     # --------------------------------------------------
 
