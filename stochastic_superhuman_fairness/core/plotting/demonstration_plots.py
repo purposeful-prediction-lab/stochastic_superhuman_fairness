@@ -103,8 +103,8 @@ def plot_label_agreement_stats(
 
     im = ax_heatmap.imshow(A_plot, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
     ax_heatmap.set_title(f"{split} sorted pairwise agreement")
-    ax_heatmap.set_xlabel("Model")
-    ax_heatmap.set_ylabel("Model")
+    ax_heatmap.set_xlabel("Demos")
+    ax_heatmap.set_ylabel("Demos")
 
     if show_colorbar:
         cbar = fig.colorbar(im, ax=ax_heatmap)

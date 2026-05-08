@@ -41,11 +41,25 @@ class Demonstrator(AgreementStatsMixin):
 
         if auto_create:
             self.create_demos(to_torch = self.to_torch_flag)
+
             self._compute_standalone_demofeats()
             self._compute_standalone_demolabels()
+        # Optionally keep a subset of the required fairness measures. 
         self.keep_only_requested_fairness_metrics(required_metrics=self.metrics)
-        #  import ipdb;ipdb.set_trace()
+        # If we want to join the train and eval demosets,
+        if getattr(self.dcfg, "join_train_eval", False):
+            self.join_train_eval_and_resplit(
+                train_ratio=getattr(self.dcfg, "train_ratio", 0.8),
+                shuffle=getattr(self.dcfg, "join_shuffle", True),
+                seed=getattr(self.cfg, "seed", 0),
+            )
+        # COmpute demo rankings and intrademo subdom
         self.compute_demo_ranking()
+        # Optionallly keep only thetop-k train demos based on 1) beat rates or 2) subdom 
+        if self.dcfg.get('get_top_k', None) is not None:
+            self.get_top_k(k = self.dcfg['get_top_k'], metric =self.dcfg['top_k_metric'])
+
+        #  import ipdb;ipdb.set_trace()
         self.compute_intrademo_subdom()
         self.compute_intrademo_ot()
         self.compute_label_agreement_dict()
@@ -83,7 +97,6 @@ class Demonstrator(AgreementStatsMixin):
         self.intrademo_ot_dict = out
         self.intrademo_gamma = out['gamma_np']
         self.intrademo_gamma_torch = torch.tensor(out['gamma_np']).to(device)
-        #  import ipdb;ipdb.set_trace()
     # --------------------------------------------------
     def compute_intrademo_subdom(self, alpha: float = None, beta = None, to_torch = True):
         '''Default alpha = all ones and beta 0. scalars are repeated to match feature dim K.
@@ -101,11 +114,98 @@ class Demonstrator(AgreementStatsMixin):
 
     # --------------------------------------------------
 
-    #  def get_top_k(self, k : float, metric: Literal["beat_rate", "subdom"] = "beat_rate"):
-    #      if (k>0) and (k <=1.):
-    #          int_k = int(k*len(self.train_demo_feats))
-    #      elif k >  self.num_demos_train:
-    #          int_k = self.num_demos_train
+    def get_top_k(
+    self,
+    k: float | int,
+    metric: Literal["beat_rate", "subdom", "sum_feats"] = "beat_rate",
+    split: Literal["train"] = "train",
+    ):
+        """
+        Keep only top-k train demos in-place and refresh derived cached attributes.
+
+        k:
+          - 0 < k <= 1 : fraction of demos
+          - k > 1      : absolute number of demos
+
+        metric:
+          - beat_rate : higher is better
+          - subdom    : lower mean intrademo subdom is better
+          - sum_feats : lower total cost features is better
+        """
+        if split != "train":
+            raise NotImplementedError("Only train cropping is supported for now.")
+
+        if self.train_demos is None or len(self.train_demos) == 0:
+            raise ValueError("No train demos loaded.")
+
+        # Make sure standalone arrays and intrademo S exist.
+        if not hasattr(self, "train_demo_feats"):
+            self._compute_standalone_demofeats()
+        if not hasattr(self, "train_demo_labels"):
+            self._compute_standalone_demolabels()
+        if not hasattr(self, "intra_S"):
+            self._compute_intra_demo_subdominance()
+
+        n = len(self.train_demos)
+        k = float(k)
+
+        if 0 < k <= 1:
+            int_k = max(1, int(round(k * n)))
+        elif k > 1:
+            int_k = min(int(k), n)
+        else:
+            raise ValueError(f"k must be > 0, got {k}")
+
+        if metric == "beat_rate":
+            if not hasattr(self, "beat_rates_train"):
+                self.beat_rates_train = compute_beat_rates(self.intra_S)
+            scores = self.beat_rates_train
+            keep_idx = np.argsort(-scores)[:int_k]   # higher better
+
+        elif metric == "subdom":
+            scores = self.intra_S.mean(axis=1)
+            keep_idx = np.argsort(scores)[:int_k]    # lower better
+
+        elif metric == "sum_feats":
+            scores = np.asarray(self.train_demo_feats).sum(axis=1)
+            keep_idx = np.argsort(scores)[:int_k]    # lower cost better
+
+        else:
+            raise ValueError(f"Unknown top-k metric: {metric}")
+
+        keep_idx = np.asarray(keep_idx, dtype=int)
+
+        # Optional: preserve rank order in the cropped demoset.
+        self.train_demos = [self.train_demos[i] for i in keep_idx]
+
+        # Metadata/debugging.
+        self.top_k_train_original_n = n
+        self.top_k_train_keep_idx = keep_idx
+        self.top_k_train_metric = metric
+        self.num_demos_train = len(self.train_demos)
+
+        if hasattr(self, "meta") and self.meta is not None:
+            self.meta["top_k_train"] = int_k
+            self.meta["top_k_train_metric"] = metric
+            self.meta["top_k_train_original_n"] = n
+            self.meta["n_demos_train"] = len(self.train_demos)
+
+        # Rebuild derived arrays from the cropped demos.
+        self._compute_standalone_demofeats()
+        self._compute_standalone_demolabels()
+
+        # Remove stale sorted caches if they exist.
+        self._clear_demo_derived_cache()
+        # recompute rankings/subdom on cropped set.
+        self.compute_demo_ranking()
+        #  import ipdb;ipdb.set_trace()
+        return {
+            "keep_idx": keep_idx,
+            "n_before": n,
+            "n_after": len(self.train_demos),
+            "metric": metric,
+        }        
+
     def _compute_standalone_demolabels(self):
         self.train_demo_labels = torch.stack([d["y_demo"] for d in self.train_demos])  # [D,K]      
         self.eval_demo_labels = torch.stack([d["y_demo"] for d in self.eval_demos])  # [D,K]      
@@ -113,10 +213,7 @@ class Demonstrator(AgreementStatsMixin):
     # --------------------------------------------------
 
     def _compute_standalone_demofeats(self):
-        try:
-            self.train_demo_feats = np.stack([d["fairness_feats"] for d in self.train_demos])  # [D,K]      
-        except:
-            import ipdb;ipdb.set_trace()
+        self.train_demo_feats = np.stack([d["fairness_feats"] for d in self.train_demos])  # [D,K]      
         self.eval_demo_feats = np.stack([d["fairness_feats"] for d in self.eval_demos])  # [D,K]      
         self.train_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.train_demo_feats)
         self.eval_demo_means_sorted = Demonstrator.compute_sorted_demo_means(self.eval_demo_feats)
@@ -284,7 +381,6 @@ class Demonstrator(AgreementStatsMixin):
 
     def create_demos(self, resample=False, to_torch: bool = True):
 
-        #  import ipdb;ipdb.set_trace()
         sample_override = getattr(self.cfg.demonstrator, "demo_sample", None)
 
         if sample_override:
@@ -311,8 +407,11 @@ class Demonstrator(AgreementStatsMixin):
 
             if 'zip' in dcfg.save_format:
                 out = np.load(np_path, allow_pickle=True)
-                self.train_demos = out["train_demos"].tolist()
-                self.eval_demos = out["eval_demos"].tolist()
+                #  self.train_demos = out["train_demos"].tolist()
+                #  self.eval_demos = out["eval_demos"].tolist()
+                self.eval_demos = out["train_demos"].tolist()
+                self.train_demos = out["eval_demos"].tolist()
+
                 self.meta = out.get("metadata", {}).tolist()
                 if self.meta == {}:
                     print("\nNo metadata found in npz!...\n")
@@ -340,8 +439,11 @@ class Demonstrator(AgreementStatsMixin):
         Atr, Ate = ds.get("sensitive_train").astype(int), ds.get("sensitive_test").astype(int)
 
         if demotype == "lrdecisions":
-            self.train_demos = self._create_demos_lrdecisions(Xtr, ytr, Atr, is_eval=False)
-            self.eval_demos  = self._create_demos_lrdecisions(Xte, yte, Ate, is_eval=True)
+            #  self.train_demos = self._create_demos_lrdecisions(Xtr, ytr, Atr, is_eval=False)
+            #  self.eval_demos  = self._create_demos_lrdecisions(Xte, yte, Ate, is_eval=True)
+            self.eval_demos = self._create_demos_lrdecisions(Xtr, ytr, Atr, is_eval=False)
+            self.train_demos  = self._create_demos_lrdecisions(Xte, yte, Ate, is_eval=True)
+
 
         else:
             self.train_demos = self._partition(Xtr, ytr, Atr, resample=resample)
@@ -507,7 +609,6 @@ class Demonstrator(AgreementStatsMixin):
 
                 results.append(fairness_feats)
             global_metrics = {m: float(np.mean([dm[i] for dm in results])) for i,m in enumerate(metrics)}
-            #  import ipdb;ipdb.set_trace()
             return {"local": results, "global": global_metrics}
 
     def _create_demos_lrdecisions(self, X, y, A, is_eval: bool = False):
@@ -1176,3 +1277,103 @@ class Demonstrator(AgreementStatsMixin):
             "eval_demos": self.eval_demos,
             "metadata": self.meta,
         }
+    def join_train_eval_and_resplit(
+        self,
+        train_ratio: float | None = None,
+        shuffle: bool = True,
+        seed: int | None = None,
+    ):
+        """
+        Join current train/eval demos, then resplit into train/eval demos.
+
+        This should run after demos are loaded/created and metric filtering is applied,
+        but before compute_demo_ranking() and get_top_k().
+        """
+        if self.train_demos is None or self.eval_demos is None:
+            raise ValueError("No demos loaded. Call create_demos() first.")
+
+        if train_ratio is None:
+            train_ratio = float(getattr(self.cfg.demonstrator, "train_ratio", 0.8))
+        else:
+            train_ratio = float(train_ratio)
+
+        if not (0.0 < train_ratio < 1.0):
+            raise ValueError(f"train_ratio must be in (0,1), got {train_ratio}")
+
+        all_demos = list(self.train_demos) + list(self.eval_demos)
+        n = len(all_demos)
+
+        if n < 2:
+            raise ValueError(f"Need at least 2 demos to resplit, got {n}")
+
+        indices = np.arange(n)
+
+        if shuffle:
+            rng = np.random.default_rng(seed)
+            rng.shuffle(indices)
+
+        n_train = int(round(train_ratio * n))
+        n_train = min(max(1, n_train), n - 1)
+
+        train_idx = indices[:n_train]
+        eval_idx = indices[n_train:]
+
+        orig_train_n = len(self.train_demos)
+        orig_eval_n = len(self.eval_demos)
+
+        self.train_demos = [all_demos[i] for i in train_idx]
+        self.eval_demos = [all_demos[i] for i in eval_idx]
+
+        self.num_demos_train = len(self.train_demos)
+        self.num_demos_eval = len(self.eval_demos)
+
+        if hasattr(self, "meta") and self.meta is not None:
+            self.meta["join_train_eval"] = True
+            self.meta["join_train_eval_shuffle"] = bool(shuffle)
+            self.meta["join_train_eval_seed"] = seed
+            #  self.meta["join_train_eval_original_train_n"] = int(len(train_idx) + len(eval_idx))
+            self.meta["join_train_eval_original_train_n"] = len(self.train_demos)
+            self.meta["join_train_eval_original_eval_n"] = len(self.eval_demos)
+            self.meta["n_demos_train"] = self.num_demos_train
+            self.meta["n_demos_eval"] = self.num_demos_eval
+            self.meta["train_ratio_after_join"] = train_ratio
+
+        # Critical: rebuild all standalone arrays from the new split.
+        self._compute_standalone_demofeats()
+        self._compute_standalone_demolabels()
+
+        # Remove stale cached derived state.
+        self._clear_demo_derived_cache()
+
+        return {
+            "n_total": n,
+            "n_train": self.num_demos_train,
+            "n_eval": self.num_demos_eval,
+            "train_idx": train_idx,
+            "eval_idx": eval_idx,
+        }
+    def _clear_demo_derived_cache(self):
+        for name in [
+            "intra_S",
+            "intra_S_eval",
+            "beat_rates_train",
+            "beat_rates_eval",
+            "demo_ranking_train",
+            "demo_ranking_eval",
+            "train_demos_sorted",
+            "eval_demos_sorted",
+            "train_demo_feats_sorted",
+            "eval_demo_feats_sorted",
+            "train_intrademo_subdom_dict",
+            "eval_intrademo_subdom_dict",
+            "train_intrademo_S_torch",
+            "eval_intrademo_S_torch",
+            "train_intrademo_mean_subdom",
+            "eval_intrademo_mean_subdom",
+            "intrademo_ot_dict",
+            "intrademo_gamma",
+            "intrademo_gamma_torch",
+            "label_agreement_dict",
+        ]:
+            if hasattr(self, name):
+                delattr(self, name)

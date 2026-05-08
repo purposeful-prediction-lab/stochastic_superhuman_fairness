@@ -122,7 +122,8 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
     y_demo = y_demo.to(device).float()                    # [D,N]
     gamma = gamma.to(device).float()                      # [R,D]
     I = indicator_win.to(device).float()                  # [R,D]
-
+    if criterion.ndim == 0:
+        criterion = criterion.repeat(S.shape[0])
     if normalize_gamma:
         gamma = gamma / (gamma.sum() + eps)
 

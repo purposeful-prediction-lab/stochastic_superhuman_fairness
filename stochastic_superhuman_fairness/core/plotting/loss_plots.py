@@ -126,6 +126,19 @@ def plot_loss_and_subdom(
         and loss_term_values is not None
         and loss_term_values.size > 0
     )
+    
+    # TODO: pick a few demos  and one policy train on that see what happens
+    # Why isnt the demo logprobs mathcing the matched demos still?
+    # Do a few folds for each epoch with the same rollouts i.e mini epochs
+    # Perhaps reduce the size of the sample size N
+    # Does each demo match with the same policy's samples consistently? otheriwsie thats what we fail
+    # Perhaps offpolicy additions with a replay buffer
+    # Try to visualize the coupling over time. Somehow. Perhaps start with less policiies / demos? 
+    # Email Jon Fyke for computation  
+    # 2nd order  subdominance -> check for dominance over demonstration mixtures
+    # Talk to Sayed for 2nd order stuff plus notes or maybe try this mathcing instead of our OT pairing
+
+
 
     # ---- plotting
     if ax is None:
@@ -195,5 +208,8 @@ def plot_loss_and_subdom(
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
 
-    fig.tight_layout()
+    try:
+        fig.tight_layout()
+    except:
+        import ipdb;ipdb.set_trace()
     return fig, ax1

@@ -524,7 +524,6 @@ def plot_dominance_counts(
             raise ValueError("per_mode provided but no valid entries.")
 
         n_modes = len(first_valid)
-        #  import ipdb;ipdb.set_trace()
         if palette is None:
             cmap = plt.cm.get_cmap("tab10", n_modes)
             palette = [cmap(i) for i in range(n_modes)]
@@ -602,6 +601,7 @@ def plot_dominance_counts(
         fig.tight_layout()
 
     return fig, ax
+
 def plot_paired_subdominance_curve(
     logs,
     *,
@@ -782,6 +782,7 @@ def plot_policy_probs(
     if len(probs) == 0:
         raise ValueError("No entries found for log['train/policy_probs'].")
 
+    #  import ipdb;ipdb.set_trace()
     probs = np.stack(probs, axis=0)  # (T, P)
     epochs = np.asarray(epochs)
 

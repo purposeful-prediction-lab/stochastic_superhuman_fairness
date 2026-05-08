@@ -38,17 +38,20 @@ demonstrator:
   demotype: lrdecisions  # partition or lrdecisions
   # LR (Logistic Regression) Decisions Specific
   n_models: 100 # only used with lr decisions. How many classifier are trained. One per demo.
-  subset_ratio: 0.1 # subset of training data that lr classifiers are used, but provide pred to entire train set.
+  subset_ratio: 0.1 # subset of training data that lr classifiers are trained on, but provide pred to entire train set. (both train and eval cases)
   # Data Partition Specific
   demo_size: 100  # ingored with lr decisions, only used for partitions
   # General
   compute_global: true
+  join_train_eval: False # This can only work if train and eval are formed from equally sized datasets: train_ratio = 0.5
+  get_top_k:  # if not None, should be float in [0,1]
+  top_k_metric: 'beat_rate' # beat_rate, subdom
   normalize: True # Constraint values
   normalize_mode: 'continuous'
   overwrite: False # True/ False. True will force regenerate the demos, even if they exist
   cache_dir: "./data"
   metrics: ["D.DP", "D.EqOdds", "D.PRP", "D.Err", "L.ZeroOne"] # Default list; overwritten by metrics above
-  train_ratio: 0.8 # amount of data exclusively in training set
+  train_ratio: 0.8 # amount of data exclusively in training set split. This then forms train_demos and eval_demos
   protected_attrs:          # these are attributes are ommited from the the features
   sensitive_attrs: ['sex']  # these are the attributes  that fairness is measured on
   save_format: "zip" # zip or npy. with npy a separate json metadata file is saved at data folder
@@ -75,7 +78,7 @@ learner:
         # policy_sources: ['logistic_model_adult_performance_0p1884_0p1289_0p0559_0p0903_0p1419.pkl', 'logistic_model_adultpoor_performance_0p2638_0p1222_0p1846_0p0681_0p4236.pkl']
         policy_sources: ['random']
         policy_mixture: [1.]
-        n_models: 5
+        n_models: 10
         init_noise_std: 0.1
       train:
         lr: 0.003
@@ -109,7 +112,7 @@ learner:
       stochastic:
         solver: 'mosek' # mosek, sinkhorn, mip_mosek
         weighted_S_matrix: False
-        indicator_func: 'median_intrademo_subdom' # median, mean, NOne, median_intrademo_subdom
+        indicator_func: 'match_sum' # median, mean, NOne, median_intrademo_subdom, match_sum
         row_constraints: False         # Bool
         col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking, policy_probs
         ot_temperature: 1.0

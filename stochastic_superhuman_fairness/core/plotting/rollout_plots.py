@@ -1203,9 +1203,8 @@ def plot_zero_one_vs_features_demo_logprobs_from_log(
     #  lab_ord = [demo_text_labels[i] for i in order]
     # ---------- plotting ----------
 
-    import ipdb;ipdb.set_trace()
+    #  import ipdb;ipdb.set_trace()
     for m, Xm in enumerate(modes):
-        #  import ipdb;ipdb.set_trace()
         rcolor = mode_colors[m]
         p_raw = demo_logprobs[m]          # (D,)
         p_norm = demo_logprobs_norm[m]    # (D,)

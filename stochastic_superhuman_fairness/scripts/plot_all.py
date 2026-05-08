@@ -289,7 +289,7 @@ def main():
 
     # Plot Coupling for each mode and demo
     # =====================================================================================
-    demo_text_labels = np.arange(20).tolist() + [None] * (len(demo_feats)-20)
+    demo_text_labels = np.arange(10).tolist() + [None] * (len(demo_feats)-10)
     mode_colors = mode_palette[:len(feats_by_mode)]
 
     fig, axes = plot_zero_one_vs_features_mode_coupling(
