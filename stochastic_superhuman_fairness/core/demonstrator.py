@@ -68,7 +68,7 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
                 ranks=self.dcfg["only_select_demos"],
                 metric=demo_selection_metric,
                 split="train",
-                one_based=True,
+                one_based=False,
             )
 
         elif self.dcfg.get("get_top_k", None) is not None:
@@ -145,7 +145,7 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
             "strictly_dominated",
         ] = "beat_rate",
         split: Literal["train"] = "train",
-        one_based: bool = True,
+        one_based: bool = False,
     ):
         if split != "train":
             raise NotImplementedError("Only train demo selection is supported for now.")
@@ -155,7 +155,7 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
 
         ranks = list(ranks)
         pos = np.asarray(ranks, dtype=int) - 1 if one_based else np.asarray(ranks, dtype=int)
-
+        #  import ipdb;ipdb.set_trace()
         if np.any(pos < 0) or np.any(pos >= n_order):
             raise IndexError(
                 f"Requested ranks {ranks} out of range for {n_order} ranked demos."

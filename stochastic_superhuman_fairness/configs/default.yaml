@@ -118,19 +118,14 @@ learner:
       stochastic:
         solver: 'mosek' # mosek, sinkhorn, mip_mosek
         weighted_S_matrix: False
-        indicator_func: 'match_sum' # median, mean, NOne, median_intrademo_subdom, match_sum | soft_ adds use of sigmoid smoothing to indicators instead ob binary [0,1]
-        row_constraints: False         # Bool
-        col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking, policy_probs
-        ot_temperature: 1.0
-        gamma_temperature: 1.0
-        normalize_s_matrix: True
+        indicator_func: 'soft_match_sum' # median, mean, NOne, median_intrademo_subdom, match_sum | soft_ adds use of sigmoid smoothing to indicators instead ob binary [0,1]
+        gamma_temperature: 1.0 # Can be used to sharpen gamma matrix after we get it from OT solver
         renormalize_gamma: False
         compute_intrademo_ot_loss: True
         coupling_cfg:
           row_constraints: False         # Bool
           col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking, policy_probs
-          ot_temperature: 1.0
-          gamma_temperature: 1.0
+          S_tau: 1.0        # can be used to sharpen subdom matrix S before ot
           normalize_s_matrix: False
           gamma_smoothing_ema: 0.8 # Controls impact of t-1 epoch's gamma. None for no temporal smoothing or ema~[0,1]
 
