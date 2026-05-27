@@ -12,6 +12,7 @@ from stochastic_superhuman_fairness.core.utils import (
 from stochastic_superhuman_fairness.core.models.registry import MODEL_REGISTRY
 from stochastic_superhuman_fairness.core.demonstrator import Demonstrator
 from stochastic_superhuman_fairness.core.utils import NamespaceDict, dict_to_ns
+from stochastic_superhuman_fairness.core.dataclasses.utils import convert_matching_sections_to_dataclasses
 
 try:
     import yaml
@@ -123,16 +124,7 @@ def _extract_state_dict(obj: Any) -> Dict[str, torch.Tensor]:
 # ---------------------------------------------------------------------
 # Schedule formation and selection from CFG
 # ---------------------------------------------------------------------
-
-
 def validate_and_select_phase_cfg(cfg_ns, *, phase_idx: int, device: str):
-    """
-    Returns (phase_cfg_ns, algo_str).
-
-    Merges cfg.learner.default into cfg.learner.schedule[phase_idx],
-    then injects device + seed, and lowercases algo.
-    """
-    # cfg_ns is NamespaceDict (attribute access) produced from config.json/yaml
     learner = getattr(cfg_ns, "learner", None)
     if learner is None:
         raise ValueError("Config missing 'learner' section.")
@@ -142,11 +134,12 @@ def validate_and_select_phase_cfg(cfg_ns, *, phase_idx: int, device: str):
         raise ValueError("Training schedule missing: cfg.learner.schedule is empty.")
 
     if not (0 <= phase_idx < len(schedule)):
-        raise IndexError(f"phase_idx={phase_idx} out of range; schedule has {len(schedule)} entries.")
+        raise IndexError(
+            f"phase_idx={phase_idx} out of range; schedule has {len(schedule)} entries."
+        )
 
     default_cfg = getattr(learner, "default", {}) or {}
 
-    # Merge: default first, then phase overrides
     entry = dict_to_ns(default_cfg.copy())
     dict_to_ns(entry).update_from(schedule[phase_idx])
 
@@ -156,17 +149,18 @@ def validate_and_select_phase_cfg(cfg_ns, *, phase_idx: int, device: str):
     entry["algo"] = str(entry["algo"]).lower()
     entry["device"] = device
 
-    # seed lives at top-level in your config
     if hasattr(cfg_ns, "seed"):
         entry["seed"] = cfg_ns.seed
 
-    return dict_to_ns(entry), entry["algo"]
-def validate_schedule(schedule, *, cfg, device, default_learner_cfg=None):
-    """
-    Returns a list of validated phase configs (NamespaceDict),
-    where each phase is default_learner_cfg merged with the phase override.
-    """
+    entry = convert_matching_sections_to_dataclasses(
+        entry,
+        suffixes=("Config", "", 'cfg'),
+        strict=False,
+    )
 
+    return entry, entry["algo"]
+
+def validate_schedule(schedule, *, cfg, device, default_learner_cfg=None):
     if default_learner_cfg is None:
         default_learner_cfg = cfg.get("learner", {}).get("default", {})
 
@@ -174,6 +168,7 @@ def validate_schedule(schedule, *, cfg, device, default_learner_cfg=None):
         raise ValueError("Training schedule missing in config.")
 
     validated = []
+
     for i, phase in enumerate(schedule):
         entry = dict_to_ns(default_learner_cfg.copy())
         dict_to_ns(entry).update_from(phase)
@@ -185,8 +180,79 @@ def validate_schedule(schedule, *, cfg, device, default_learner_cfg=None):
         entry["device"] = device
         entry["seed"] = cfg.seed if hasattr(cfg, "seed") else cfg.get("seed", None)
 
-        validated.append(dict_to_ns(entry))
+        entry = convert_matching_sections_to_dataclasses(
+            entry,
+            dataclass_dir="core/dataclasses",
+            strict=False,
+        )
+
+        validated.append(entry)
+
     return validated
+#----------
+#  def validate_and_select_phase_cfg(cfg_ns, *, phase_idx: int, device: str):
+#      """
+#      Returns (phase_cfg_ns, algo_str).
+#
+#      Merges cfg.learner.default into cfg.learner.schedule[phase_idx],
+#      then injects device + seed, and lowercases algo.
+#      """
+#      # cfg_ns is NamespaceDict (attribute access) produced from config.json/yaml
+#      learner = getattr(cfg_ns, "learner", None)
+#      if learner is None:
+#          raise ValueError("Config missing 'learner' section.")
+#
+#      schedule = getattr(learner, "schedule", None)
+#      if not schedule:
+#          raise ValueError("Training schedule missing: cfg.learner.schedule is empty.")
+#
+#      if not (0 <= phase_idx < len(schedule)):
+#          raise IndexError(f"phase_idx={phase_idx} out of range; schedule has {len(schedule)} entries.")
+#
+#      default_cfg = getattr(learner, "default", {}) or {}
+#
+#      # Merge: default first, then phase overrides
+#      entry = dict_to_ns(default_cfg.copy())
+#      dict_to_ns(entry).update_from(schedule[phase_idx])
+#
+#      if "algo" not in entry:
+#          raise ValueError(f"Missing 'algo' in schedule entry {phase_idx}")
+#
+#      entry["algo"] = str(entry["algo"]).lower()
+#      entry["device"] = device
+#
+#      # seed lives at top-level in your config
+#      if hasattr(cfg_ns, "seed"):
+#          entry["seed"] = cfg_ns.seed
+#
+#      return dict_to_ns(entry), entry["algo"]
+#
+#  def validate_schedule(schedule, *, cfg, device, default_learner_cfg=None):
+#      """
+#      Returns a list of validated phase configs (NamespaceDict),
+#      where each phase is default_learner_cfg merged with the phase override.
+#      """
+#
+#      if default_learner_cfg is None:
+#          default_learner_cfg = cfg.get("learner", {}).get("default", {})
+#
+#      if not schedule:
+#          raise ValueError("Training schedule missing in config.")
+#
+#      validated = []
+#      for i, phase in enumerate(schedule):
+#          entry = dict_to_ns(default_learner_cfg.copy())
+#          dict_to_ns(entry).update_from(phase)
+#
+#          if "algo" not in entry:
+#              raise ValueError(f"Missing 'algo' in schedule entry {i}")
+#
+#          entry["algo"] = entry["algo"].lower()
+#          entry["device"] = device
+#          entry["seed"] = cfg.seed if hasattr(cfg, "seed") else cfg.get("seed", None)
+#
+#          validated.append(dict_to_ns(entry))
+#      return validated
 # ---------------------------------------------------------------------
 # Core loader
 # ---------------------------------------------------------------------
@@ -272,4 +338,7 @@ def load_model_from_archive(
         model.load_dist_state(dist_state, device=device)
 
     return model, cfg_dict, demo
+# Dataclass interaction
+
+
 

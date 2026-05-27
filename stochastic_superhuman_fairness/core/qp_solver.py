@@ -1,11 +1,41 @@
 import torch
-from typing import Literal, Union
 import numpy as np
 import mosek
 import matplotlib.pyplot as plt
-from stochastic_superhuman_fairness.core.utils import minmax_normalize
+from typing import Literal, Union
+from stochastic_superhuman_fairness.core.gamma_utils import  smooth_gamma
+# -----------------------------------------------------------------------------
+# Utils
+# -----------------------------------------------------------------------------
 
-#----------------------------------------------------------------------------------------
+def minmax_normalize(x, eps=1e-12):
+    x = np.asarray(x, dtype=float)
+    lo, hi = x.min(), x.max()
+    return (x - lo) / (hi - lo + eps)
+
+
+def _normalize_marginal(x, n, name):
+    if x is None:
+        return np.ones(n) / n
+
+    x = np.asarray(x, dtype=float).reshape(-1)
+    if x.size != n:
+        raise ValueError(f"{name} length {x.size} != {n}")
+
+    x = np.clip(x, 0.0, None)
+    s = x.sum()
+    if s <= 0:
+        raise ValueError(f"{name} must have positive sum")
+
+    return x / s
+
+
+def _prepare_cost(S, normalize_s_matrix, tau):
+    S = np.asarray(S, dtype=float)
+    if normalize_s_matrix:
+        S = minmax_normalize(S)
+    return S * tau
+
 def bj_from_beatrates_nocollapse(
     beat_rates,
     tau: float = 5.0,
@@ -42,135 +72,10 @@ def bj_from_beatrates_nocollapse(
 
     return b
 
-#----------------------------------------------------------------------------------------
 
-def prepare_subdom_cost(
-    S: np.ndarray,
-    normalize: bool = True,
-    tau: float = 1.0,
-    adaptive_tau: bool = True,
-    max_tau: float = 1000.0,
-    tol_gamma_std: float = 0.03,
-    solver_fn=None,                 # optional: callable returning γ for diagnostics
-    solver_kwargs=None,
-    verbose: bool = True,
-):
-    """
-    Prepare the subdominance cost matrix before solving for γ,
-    with optional adaptive temperature (τ) tuning.
-
-    Parameters
-    ----------
-    S : np.ndarray
-        Raw subdominance matrix (num_samples × num_demos).
-    normalize : bool
-        Center and scale to 0 mean, unit std.
-    tau : float
-        Initial temperature (contrast multiplier).
-    adaptive_tau : bool
-        If True, increase τ until γ becomes sufficiently non-uniform.
-    max_tau : float
-        Upper bound for adaptive τ.
-    tol_gamma_std : float
-        Minimum acceptable std(γ) to consider coupling “non-uniform.”
-    solver_fn : callable or None
-        Optional function handle: gamma = solver_fn(S, **solver_kwargs)
-        Used only for diagnostic γ.std measurement during τ tuning.
-    solver_kwargs : dict
-        Passed to solver_fn if provided.
-    verbose : bool
-        Print summary statistics.
-
-    Returns
-    -------
-    S_prepared : np.ndarray
-        Preprocessed cost matrix (same shape as input).
-    final_tau : float
-        Final temperature used (after adaptive tuning).
-    """
-
-    S_scaled = np.asarray(S, dtype=float)
-    if verbose:
-        print(f"[prepare_subdom_cost] input mean/std = {S.mean():.3f}/{S.std():.3f}")
-
-    # ------------------------------------------------------------
-    # 2️⃣  Normalizee
-    # ------------------------------------------------------------
-    if normalize:
-        S_scaled = minmax_normalize(S)
-        if verbose:
-            print(f"[prepare_subdom_cost] normalized mean/std = {S.mean():.3f}/{S.std():.3f}")
-
-    # ------------------------------------------------------------
-    # 3️⃣  Apply temperature scaling (initial τ)
-    # ------------------------------------------------------------
-    S_scaled = S_scaled * tau
-    if verbose:
-        print(f"[prepare_subdom_cost] applied initial τ={tau:.2f} → mean/std = {S_scaled.mean():.3f}/{S_scaled.std():.3f}")
-
-    # ------------------------------------------------------------
-    # 4️⃣  Optional adaptive τ tuning
-    # ------------------------------------------------------------
-    final_tau = tau
-    if adaptive_tau and solver_fn is not None:
-        # clone solver kwargs
-        solver_kwargs = solver_kwargs or {}
-        gamma_std = 0.0
-        while gamma_std < tol_gamma_std and final_tau < max_tau:
-            S_try = S * final_tau
-            gamma_try, *_ = solver_fn(S_try, **solver_kwargs)
-            gamma_std = float(np.std(gamma_try))
-            if verbose:
-                print(f"[τ-tune] τ={final_tau:.2f} → γ.std={gamma_std:.4f}")
-            if gamma_std < tol_gamma_std:
-                final_tau *= 1.5  # increase contrast
-            else:
-                break
-
-        if final_tau > max_tau:
-            final_tau = max_tau
-            if verbose:
-                print(f"[τ-tune] reached max τ={max_tau:.2f} (γ.std={gamma_std:.4f})")
-        else:
-            if verbose:
-                print(f"[τ-tune] final τ={final_tau:.2f} achieved γ.std={gamma_std:.4f}")
-
-        S_scaled = minmax_normalize(S)
-        S_scaled = S_scaled * final_tau
-
-    if verbose:
-        print(f"[prepare_subdom_cost] final mean/std = {S_scaled.mean():.3f}/{S_scaled.std():.3f}")
-    return S_scaled, final_tau
-
-
-"""
-Superhuman Fairness — Coupling Solvers  (samples × demos version)
------------------------------------------------------------------
-
-Unified interface for computing γ couplings used in subdominance
-optimization. Supports both:
-   - MOSEK QP (classic constrained OT)
-   - Sinkhorn entropic OT (strictly convex, smooth coupling)
-
-✅ Orientation
-    subdom_matrix.shape == (num_samples, num_demos)
-    rows → model rollouts / samples
-    cols → demonstrations
-
-Usage
------
-gamma, dual_r, dual_c = solve_qp_superhuman_samples_demos(
-    subdom_matrix=S_np,
-    rollout_marginals=None,
-    solver="mosek",     # or "sinkhorn"
-    lambda_reg=None,
-    normalize_subdom=True,
-    tau=5.0,
-    epsilon=0.05,
-    verbose=True,
-)
-"""
-
+# -----------------------------------------------------------------------------
+# MOSEK QP Solver
+# -----------------------------------------------------------------------------
 # ============================================================
 # 🔹 MOSEK QP solver  (samples × demos)
 # ============================================================
@@ -179,7 +84,7 @@ def _solve_qp_mosek_core(
     rollout_marginals: np.ndarray | list = None,
     demo_marginals: np.ndarray | list = None,
     lambda_reg: float | None = None,
-    normalize_subdom: bool = False,
+    normalize_s_matrix: bool = False,
     tau: float = 1.0,
     verbose: bool = True,
     row_constraints: bool = False,
@@ -198,7 +103,7 @@ def _solve_qp_mosek_core(
     num_samples, num_demos = S.shape
     n = num_samples * num_demos
     # --- Scaling ---
-    if normalize_subdom:
+    if normalize_s_matrix:
         S = minmax_normalize(S)
     if tau != 1.0:
         S = S * tau
@@ -304,10 +209,11 @@ def _solve_qp_mosek_core(
         # Partition duals based on which constraints are active
         dual_rows = np.zeros(num_samples)
         dual_cols = np.zeros(num_demos)
-        offset = 0
-        if row_constraints:
-            dual_rows = duals[offset:offset + num_samples]
-            offset += num_samples
+        offset = 1
+        #  offset = 0
+        #  if row_constraints:
+        #      dual_rows = duals[offset:offset + num_samples]
+        #      offset += num_samples
         if col_constraints:
             dual_cols = duals[offset:offset + num_demos]
 
@@ -320,540 +226,262 @@ def _solve_qp_mosek_core(
         print(f"γ row-sum std: {row_sum.std():.3e}, col-sum std: {col_sum.std():.3e}")
 
     return gamma_matrix, dual_rows, dual_cols
-# ============================================================
-# 🔹 Sinkhorn entropic solver  (samples × demos)
-# ============================================================
+
+# -----------------------------------------------------------------------------
+# Sinkhorn
+# -----------------------------------------------------------------------------
+
 def _solve_sinkhorn_core(
-    subdom_matrix: np.ndarray,
-    rollout_marginals: np.ndarray | list = None,  # rows p
-    demo_marginals: np.ndarray | list = None,     # cols q  <-- NEW
-    normalize_subdom: bool = True,
-    tau: float = 1.0,
-    epsilon: float = 0.05,
-    max_iters: int = 1_000,
-    tol: float = 1e-8,
-    verbose: bool = True,
-    row_constraints: bool = True,
-    col_constraints: bool = True,
-    renormalize_gamma: bool = True,
-):
-    S = np.asarray(subdom_matrix, dtype=float)
-    num_samples, num_demos = S.shape
-
-    if normalize_subdom:
-        S = minmax_normalize(S)
-    if tau != 1.0:
-        S = S * tau
-
-    # ---- marginals ----
-    if rollout_marginals is None:
-        p = np.ones(num_samples) / num_samples
-    else:
-        p = np.asarray(rollout_marginals, dtype=float).reshape(-1)
-        if p.size != num_samples:
-            raise ValueError(f"rollout_marginals length {p.size} != num_samples {num_samples}")
-        p = p / (p.sum() + 1e-12)
-
-    if demo_marginals is None:
-        q = np.ones(num_demos) / num_demos
-    else:
-        q = np.asarray(demo_marginals, dtype=float).reshape(-1)
-        if q.size != num_demos:
-            raise ValueError(f"demo_marginals length {q.size} != num_demos {num_demos}")
-        # ensure nonnegative and normalized
-        q = np.clip(q, 0.0, None)
-        s = q.sum()
-        if s <= 0:
-            raise ValueError("demo_marginals sums to 0 after clipping; provide positive weights.")
-        q = q / (s + 1e-12)
-
-    # ---- kernel ----
-
-    #  import ipdb;ipdb.set_trace()
-    #  S_shift = S - S.min()
-    S_shift = S 
-    K = np.exp(-S_shift / max(epsilon, 1e-12)) + 1e-300
-
-    u = np.ones(num_samples) / num_samples
-    v = np.ones(num_demos) / num_demos
-
-    if not row_constraints:
-        u[:] = 1.0
-    if not col_constraints:
-        v[:] = 1.0
-
-    def row_err(g):
-        return np.linalg.norm(g.sum(axis=1) - p, 1)
-    def col_err(g):
-        return np.linalg.norm(g.sum(axis=0) - q, 1)
-
-    for it in range(max_iters):
-        u_prev, v_prev = u.copy(), v.copy()
-
-        if row_constraints:
-            Kv = K @ v
-            Kv[Kv == 0] = 1e-300
-            u = p / Kv
-
-        if col_constraints:
-            KTu = K.T @ u
-            KTu[KTu == 0] = 1e-300
-            v = q / KTu
-
-        if (it % 50 == 0) or (it == max_iters - 1):
-            gamma = (u[:, None] * K) * v[None, :]
-            err_r = row_err(gamma) if row_constraints else 0.0
-            err_c = col_err(gamma) if col_constraints else 0.0
-            err = max(err_r, err_c)
-            if verbose:
-                print(f"[Sinkhorn] it={it:04d} | marg_err(L1) rows={err_r:.2e} cols={err_c:.2e}")
-            if err < tol:
-                break
-
-        if np.allclose(u, u_prev, atol=tol*1e-2) and np.allclose(v, v_prev, atol=tol*1e-2):
-            break
-
-    gamma = (u[:, None] * K) * v[None, :]
-
-    if verbose and (gamma < 0).any():
-        print("Some gamma values negative; clipping to 0 (numerical tiny values).")
-        gamma = np.clip(gamma, a_min=0.0, a_max=None)
-
-    #  import ipdb;ipdb.set_trace()
-    if renormalize_gamma:
-        row_sums = gamma.sum(axis=1, keepdims=True)
-        gamma = gamma / np.maximum(row_sums, 1e-6)
-
-    dual_rows = epsilon*np.log(u + 1e-300) if row_constraints else np.zeros(num_samples)
-    dual_cols = epsilon*np.log(v + 1e-300) if col_constraints else np.zeros(num_demos)
-
-    if verbose:
-        rs, cs = gamma.sum(axis=1), gamma.sum(axis=0)
-        print(f"γ mean/std: {gamma.mean():.6f} / {gamma.std():.6f}")
-        print(f"γ row-sum std: {rs.std():.3e}, col-sum std: {cs.std():.3e}")
-
-    return gamma, dual_rows, dual_cols
-
-#--------------------------
-def _solve_sinkhorn_core_ref(
-    subdom_matrix: np.ndarray,
-    rollout_marginals: np.ndarray | list = None,  # rows p
-    normalize_subdom: bool = True,
-    tau: float = 1.0,
-    epsilon: float = 0.05,
-    max_iters: int = 1_000,
-    tol: float = 1e-8,
-    verbose: bool = True,
-    row_constraints: bool = True,
-    col_constraints: bool = True,
-    renormalize_gamma: bool = True,   # optional: scale Γ to sum 1 for interpretability
-):
-    """
-    Entropic OT (Sinkhorn) with selectable marginal constraints.
-
-    If row_constraints=False, rows are not fitted (only columns if enabled).
-    If col_constraints=False, columns are not fitted (only rows if enabled).
-    If both are False, returns unprojected kernel mass Γ = K (optionally renormalized).
-
-    Returns
-    -------
-    gamma  : (num_samples, num_demos)
-    dual_r : zeros if row_constraints=False, else log u (up to constants)
-    dual_c : zeros if col_constraints=False, else log v (up to constants)
-    """
-    S = np.asarray(subdom_matrix, dtype=float)
-    num_samples, num_demos = S.shape
-
-    # ---- scale costs (match your MOSEK path) ----
-    if normalize_subdom:
-        S = minmax_normalize(S)
-    if tau != 1.0:
-        S = S * tau
-
-    # ---- marginals ----
-    if rollout_marginals is None:
-        p = np.ones(num_samples) / num_samples
-    else:
-        p = np.asarray(rollout_marginals, dtype=float)
-        p = p / (p.sum() + 1e-12)
-
-    q = np.ones(num_demos) / num_demos
-
-    # ---- kernel (log-stable shift) ----
-    S_shift = S - S.min()
-    K = np.exp(-S_shift / max(epsilon, 1e-12)) + 1e-300  # keep strictly positive
-
-    # ---- init scalings ----
-    u = np.ones(num_samples) / num_samples
-    v = np.ones(num_demos)  / num_demos
-
-    # If a side is unconstrained, we keep its scale at 1 (no projection)
-    if not row_constraints:
-        u[:] = 1.0
-    if not col_constraints:
-        v[:] = 1.0
-
-    def row_err(g):
-        return np.linalg.norm(g.sum(axis=1) - p, 1)
-    def col_err(g):
-        return np.linalg.norm(g.sum(axis=0) - q, 1)
-
-    # ---- iterations ----
-    for it in range(max_iters):
-        u_prev, v_prev = u.copy(), v.copy()
-
-        # project rows if requested
-        if row_constraints:
-            Ku = K @ v
-            Ku[Ku == 0] = 1e-300
-            u = p / Ku
-
-        # project columns if requested
-        if col_constraints:
-            KTu = K.T @ u
-            KTu[KTu == 0] = 1e-300
-            v = q / KTu
-
-        # diagnostics
-        if (it % 50 == 0) or (it == max_iters - 1):
-            gamma = (u[:, None] * K) * v[None, :]
-            err_r = row_err(gamma) if row_constraints else 0.0
-            err_c = col_err(gamma) if col_constraints else 0.0
-            err = max(err_r, err_c)
-            if verbose:
-                print(f"[Sinkhorn] it={it:04d} | "
-                      f"marg_err(L1) rows={err_r:.2e} cols={err_c:.2e}")
-            # stopping rule: only check enabled sides
-            if err < tol:
-                break
-
-        # early stationary check (helps when both sides disabled)
-        if np.allclose(u, u_prev, atol=1e-14) and np.allclose(v, v_prev, atol=1e-14):
-            break
-
-    gamma = (u[:, None] * K) * v[None, :]
-    #  import ipdb;ipdb.set_trace()
-    if verbose:
-        if (gamma < 0 ).any():
-            print("Some gamma matrix values were negative; rectifying to 0. Numerical error in very small values? (<1e-6)")
-            gamma = np.clip(gamma, a_min=0.0, a_max=None)
-
-    # Optional global renormalization: makes Γ a probability table even if unconstrained
-    if renormalize_gamma:
-        s = gamma.sum()
-        if s > 0:
-            gamma = gamma / s
-
-    # Duals (log scalings). If side disabled, return zeros.
-    dual_rows = np.log(u + 1e-300) if row_constraints else np.zeros(num_samples)
-    dual_cols = np.log(v + 1e-300) if col_constraints else np.zeros(num_demos)
-
-    if verbose:
-        rs, cs = gamma.sum(axis=1), gamma.sum(axis=0)
-        print(f"γ mean/std: {gamma.mean():.6f} / {gamma.std():.6f}")
-        print(f"γ row-sum std: {rs.std():.3e}, col-sum std: {cs.std():.3e}")
-
-    return gamma, dual_rows, dual_cols
-
-
-def _solve_mip_mosek_cover_core(
     subdom_matrix,
-    demo_requirements=None,      # q_j: min rollouts per demo
-    normalize_subdom=False,
+    rollout_marginals=None,
+    demo_marginals=None,
+    normalize_s_matrix=True,
     tau=1.0,
-    selection_reward=0.0,        # lambda: encourages using extra good rollouts
+    epsilon=0.05,
+    max_iters=1000,
+    tol=1e-8,
+    verbose=True,
+    row_constraints=True,
+    col_constraints=True,
+):
+    S = _prepare_cost(subdom_matrix, normalize_s_matrix, tau)
+    R, D = S.shape
+
+    p = _normalize_marginal(rollout_marginals, R, "rollout")
+    q = _normalize_marginal(demo_marginals, D, "demo")
+
+    K = np.exp(-S / max(epsilon, 1e-12)) + 1e-300
+
+    u = np.ones(R)
+    v = np.ones(D)
+
+    for _ in range(max_iters):
+        if row_constraints:
+            u = p / (K @ v + 1e-12)
+        if col_constraints:
+            v = q / (K.T @ u + 1e-12)
+
+    gamma = (u[:, None] * K) * v[None, :]
+
+    dual_rows = epsilon * np.log(u + 1e-300)
+    dual_cols = epsilon * np.log(v + 1e-300)
+
+    return gamma, dual_rows, dual_cols
+
+
+# -----------------------------------------------------------------------------
+# Unified Solver
+# -----------------------------------------------------------------------------
+
+def solve_qp_superhuman(
+    subdom_matrix,
+    rollout_marginals=None,
+    demo_marginals=None,
+    solver="mosek",
+    lambda_reg=None,
+    normalize_s_matrix=True,
+    tau=1.0,
+    epsilon=0.05,
+    row_constraints=True,
+    col_constraints=True,
     verbose=True,
 ):
-    """
-    Binary covering assignment:
-        x_ij in {0,1}
-        min sum_ij (C_ij - selection_reward) x_ij
-        s.t. sum_i x_ij >= q_j      every demo covered
-             sum_j x_ij <= 1        each rollout used at most once
-    """
-    S = np.asarray(subdom_matrix, dtype=float)
-    R, D = S.shape
-    n = R * D
-
-    if normalize_subdom:
-        S = minmax_normalize(S)
-    if tau != 1.0:
-        S = S * tau
-
-    if demo_requirements is None:
-        q = np.ones(D, dtype=float)
-    else:
-        q = np.asarray(demo_requirements, dtype=float).reshape(-1)
-        if q.size != D:
-            raise ValueError(f"demo_requirements length {q.size} != num_demos {D}")
-
-    if q.sum() > R:
-        raise ValueError(f"Infeasible: demo requirements sum to {q.sum()} but only {R} rollouts exist.")
-
-    c = (S - selection_reward).reshape(-1)
-
-    with mosek.Env() as env, env.Task(0, 0) as task:
-        task.putobjsense(mosek.objsense.minimize)
-
-        task.appendvars(n)
-
-        # x_ij binary
-        task.putvarboundslice(
-            0, n,
-            [mosek.boundkey.ra] * n,
-            [0.0] * n,
-            [1.0] * n,
-        )
-        for k in range(n):
-            task.putvartype(k, mosek.variabletype.type_int)
-
-        task.putcslice(0, n, c)
-
-        con = 0
-
-        # each rollout used at most once: sum_j x_ij <= 1
-        task.appendcons(R)
-        for i in range(R):
-            idx = [i * D + j for j in range(D)]
-            task.putarow(con + i, idx, [1.0] * D)
-            task.putconbound(con + i, mosek.boundkey.up, -np.inf, 1.0)
-        con += R
-
-        # each demo covered: sum_i x_ij >= q_j
-        task.appendcons(D)
-        for j in range(D):
-            idx = [i * D + j for i in range(R)]
-            task.putarow(con + j, idx, [1.0] * R)
-            task.putconbound(con + j, mosek.boundkey.lo, float(q[j]), np.inf)
-        con += D
-
-        task.optimize()
-
-        solsta = task.getsolsta(mosek.soltype.itg)
-        if solsta not in (mosek.solsta.integer_optimal, mosek.solsta.prim_feas):
-            raise RuntimeError(f"[MOSEK-MIP] optimization failed: {solsta}")
-
-        x = np.zeros(n)
-        task.getxx(mosek.soltype.itg, x)
-
-    gamma = x.reshape(R, D)
-    gamma = (gamma > 0.5).astype(float)
-
-    dual_rows = np.zeros(R)
-    dual_cols = np.zeros(D)
-
-    if verbose:
-        print(f"[MOSEK-MIP] selected rollouts: {int(gamma.sum(axis=1).sum())}/{R}")
-        print(f"[MOSEK-MIP] row sums min/max: {gamma.sum(axis=1).min()} / {gamma.sum(axis=1).max()}")
-        print(f"[MOSEK-MIP] col sums min/max: {gamma.sum(axis=0).min()} / {gamma.sum(axis=0).max()}")
-
-    return gamma, dual_rows, dual_cols
-# ============================================================
-# 🔹 Unified entry point  (samples × demos)
-# ============================================================
-def solve_qp_superhuman(
-    subdom_matrix: np.ndarray,
-    rollout_marginals: np.ndarray | list = None,
-    demo_marginals: np.ndarray | list = None,
-    solver: str = "mosek",         # "mosek" or "sinkhorn"
-    lambda_reg: float | None = None,
-    normalize_subdom: bool = True,
-    tau: float = 1.0,
-    epsilon: float = 0.05,
-    row_constraints: bool = True,
-    col_constraints: bool = True,
-    verbose: bool = True,
-):
-    """
-    Unified interface for γ coupling solvers.
-    Expects subdom_matrix with shape (num_samples, num_demos)
-    """
     solver = solver.lower()
+
     if solver == "mosek":
         return _solve_qp_mosek_core(
-            subdom_matrix=subdom_matrix,
-            rollout_marginals=rollout_marginals,
-            lambda_reg=lambda_reg,
-            normalize_subdom=normalize_subdom,
-            tau=tau,
-            col_constraints = col_constraints,
-            row_constraints = row_constraints,
-            verbose=verbose,
+            subdom_matrix,
+            rollout_marginals,
+            demo_marginals,
+            lambda_reg,
+            normalize_s_matrix,
+            tau,
+            verbose,
+            row_constraints,
+            col_constraints,
         )
+
     elif solver == "sinkhorn":
         return _solve_sinkhorn_core(
-            subdom_matrix=subdom_matrix,
-            rollout_marginals=rollout_marginals,
-            demo_marginals = demo_marginals,
-            normalize_subdom=normalize_subdom,
-            tau=tau,
-            epsilon=epsilon,
-            col_constraints = col_constraints,
-            row_constraints = row_constraints,
+            subdom_matrix,
+            rollout_marginals,
+            demo_marginals,
+            normalize_s_matrix,
+            tau,
+            epsilon,
             verbose=verbose,
+            row_constraints=row_constraints,
+            col_constraints=col_constraints,
         )
-    elif solver == "mip_mosek": # this handles the set cover case.
-        return _solve_mip_mosek_cover_core(
-            subdom_matrix=subdom_matrix,
-            demo_requirements=demo_marginals,   # here interpreted as integer requirements, not probabilities
-            normalize_subdom=normalize_subdom,
-            tau=tau,
-            selection_reward=0.0 if lambda_reg is None else lambda_reg,
-            verbose=verbose,
-        )
+
     else:
-        raise ValueError(f"Unknown solver '{solver}'. Must be 'mosek' or 'sinkhorn'.")
+        raise ValueError(f"Unknown solver {solver}")
 
 
-# ============================================================
-# 🔹 Visualization helper
-# ============================================================
-def plot_gamma_heatmap(gamma_matrix, title="γ Coupling (samples × demos)", cmap="viridis"):
-    plt.figure(figsize=(6, 4))
-    plt.imshow(gamma_matrix, cmap=cmap, aspect="auto")
-    plt.colorbar(label="γ value")
-    plt.title(title)
-    plt.xlabel("Demos")
-    plt.ylabel("Samples")
-    plt.tight_layout()
-    plt.show()
+# -----------------------------------------------------------------------------
+# Diagnostics
+# -----------------------------------------------------------------------------
 
-def compute_subdom_weights(
-    gamma, dual_rows, dual_cols,
-    method: str = "primal",
-    backend: str = "numpy"
+def cost_gap_diagnostics(S, k=2, eps=1e-12):
+    # S: [R, D], lower is better
+    sorted_S = np.sort(S, axis=0)
+    best = sorted_S[0]
+    second = sorted_S[1] if S.shape[0] > 1 else sorted_S[0]
+    gap = second - best
+
+    return {
+        "mean_best": float(best.mean()),
+        "mean_gap": float(gap.mean()),
+        "median_gap": float(np.median(gap)),
+        "frac_near_tie_1e_4": float((gap < 1e-4).mean()),
+        "frac_near_tie_1e_3": float((gap < 1e-3).mean()),
+        "frac_near_tie_1e_2": float((gap < 1e-2).mean()),
+        "gap_over_best": float((gap / (np.abs(best) + eps)).mean()),
+    }
+
+def gamma_objective_and_stability(
+    gamma,
+    cost,
+    *,
+    prev_gamma=None,
+    eps=1e-12,
+    support_eps=1e-9,
 ):
-    """
-    method:
-      - 'primal'    → weights = gamma.sum(axis=1)
-      - 'dual'      → weights = dual_cols
-      - 'row_dual'  → weights = dual_rows
+    gamma = np.asarray(gamma, dtype=float)
+    cost = np.asarray(cost, dtype=float)
 
-    backend:
-      - 'numpy'
-      - 'torch'
-    """
+    if gamma.shape != cost.shape:
+        raise ValueError(f"gamma and cost shape mismatch: {gamma.shape} vs {cost.shape}")
 
-    method = method.lower()
-    if method == "primal":
-        w = gamma.sum(axis=1 if backend=="numpy" else 1)
+    row_mass = gamma.sum(axis=1)
+    col_mass = gamma.sum(axis=0)
 
-    elif method == "dual":
-        if dual_cols is None:
-            raise ValueError("dual_cols unavailable for method='dual'")
-        w = dual_cols
+    out = {
+        "objective": float((gamma * cost).sum()),
+        "support_size": int((gamma > support_eps).sum()),
+        "top1": np.argmax(gamma, axis=0).tolist(),  # best rollout per demo
+        "row_mass_std": float(row_mass.std()),
+        "col_mass_std": float(col_mass.std()),
+        "total_mass": float(gamma.sum()),
+    }
 
-    elif method == "row_dual":
-        if dual_rows is None:
-            raise ValueError("dual_rows unavailable for method='row_dual'")
-        w = dual_rows
+    if prev_gamma is not None:
+
+        prev_gamma = np.asarray(prev_gamma, dtype=float)
+
+        if prev_gamma.shape != gamma.shape:
+            raise ValueError(
+                f"prev_gamma shape mismatch: {prev_gamma.shape} vs {gamma.shape}"
+            )
+
+        diff = gamma - prev_gamma
+
+        abs_delta = float(np.linalg.norm(diff))
+        rel_delta = float(abs_delta / (np.linalg.norm(prev_gamma) + eps))
+
+        # per-demo deltas, useful for your plots
+        abs_delta_per_demo = np.linalg.norm(diff, axis=0)
+        prev_norm_per_demo = np.linalg.norm(prev_gamma, axis=0)
+        rel_delta_per_demo = abs_delta_per_demo / (prev_norm_per_demo + eps)
+
+        prev_top1 = np.argmax(prev_gamma, axis=0)
+        curr_top1 = np.argmax(gamma, axis=0)
+        top1_flip = curr_top1 != prev_top1
+
+        out.update({
+            "abs_delta": abs_delta,
+            "rel_delta": rel_delta,
+            "abs_delta_per_demo": abs_delta_per_demo.tolist(),
+            "rel_delta_per_demo": rel_delta_per_demo.tolist(),
+            "top1_flip_rate": float(top1_flip.mean()),
+            "top1_flips": top1_flip.astype(int).tolist(),
+        })
 
     else:
-        raise ValueError(f"Unknown weight method '{method}'")
+        out.update({
+            "abs_delta": 0.0,
+            "rel_delta": 0.0,
+            "abs_delta_per_demo": [0.0] * gamma.shape[1],
+            "rel_delta_per_demo": [0.0] * gamma.shape[1],
+            "top1_flip_rate": 0.0,
+            "top1_flips": [0] * gamma.shape[1],
+        })
 
-    return w
-# ==================================================================================================
-# All in one call
-# ==================================================================================================
+    return out
+
+def compute_weighted_flip(gamma, prev_gamma):
+    curr_top1 = np.argmax(gamma, axis=0)
+    prev_top1 = np.argmax(prev_gamma, axis=0)
+
+    flips = curr_top1 != prev_top1
+
+    # weight by confidence gap
+    curr_max = gamma.max(axis=0)
+    prev_max = prev_gamma.max(axis=0)
+
+    weight = np.abs(curr_max - prev_max)
+
+    return (flips * weight).mean()
+
+# -----------------------------------------------------------------------------
+# Main API (fixed preprocessing)
+# -----------------------------------------------------------------------------
+
 def solve_stochastic_subdom_coupling(
     S,
     solver="mosek",
+    prev_gamma = None,
     rollout_marginals=None,
     demo_marginals=None,
-    normalize_subdom=True,
+    normalize_s_matrix=True,
     tau=1.0,
-    adaptive_tau=False,
-    max_tau=1000.0,
-    tol_gamma_std=0.03,
-    row_constraints=True,
-    col_constraints=True,
     lambda_reg=None,
     epsilon=0.05,
+    row_constraints=True,
+    col_constraints=True,
+    gamma_smoothing_ema: float  = None,
     verbose=False,
-    weight_method="primal",   # NEW
-    preprocess_S: bool = False,
 ):
-    # ---- Convert input to numpy ----
     if torch.is_tensor(S):
         device = S.device
-        S_np = S.detach().cpu().numpy().astype(float)
+        S_np = S.detach().cpu().numpy()
         backend = "torch"
     else:
         S_np = np.asarray(S, dtype=float)
-        device = None
         backend = "numpy"
+        device = None
 
-    # ---- Preprocess S ----
-    if preprocess_S:
-        solver_kwargs_for_tau = {
-            "rollout_marginals": rollout_marginals,
-            "solver": solver,
-            "lambda_reg": lambda_reg,
-            "normalize_subdom": False,
-            "tau": 1.0,
-            "epsilon": epsilon,
-            "row_constraints": row_constraints,
-            "col_constraints": col_constraints,
-            "verbose": False,
-        }
-
-        S_pre, final_tau = prepare_subdom_cost(
-            S_np,
-            normalize=normalize_subdom,
-            tau=tau,
-            adaptive_tau=adaptive_tau,
-            max_tau=max_tau,
-            tol_gamma_std=tol_gamma_std,
-            solver_fn=solve_qp_superhuman,
-            solver_kwargs=solver_kwargs_for_tau,
-            verbose=verbose,
-        )
-
-    # ---- Solve QP/OT ----
-    gamma_np, dual_rows_np, dual_cols_np = solve_qp_superhuman(
-        subdom_matrix=S_np,
-        rollout_marginals=rollout_marginals,
-        demo_marginals = demo_marginals,
-        solver=solver,
-        lambda_reg=lambda_reg,
-        normalize_subdom=normalize_subdom,
-        tau=tau,
-        epsilon=epsilon,
-        row_constraints=row_constraints,
-        col_constraints=col_constraints,
-        verbose=verbose,
+    gamma_np, dual_r, dual_c = solve_qp_superhuman(
+        S_np,
+        rollout_marginals,
+        demo_marginals,
+        solver,
+        lambda_reg,
+        normalize_s_matrix,
+        tau,
+        epsilon,
+        row_constraints,
+        col_constraints,
+        verbose,
     )
+    
+    #  import ipdb;ipdb.set_trace()
+    if gamma_smoothing_ema is not None:
+        gamma_np = smooth_gamma(gamma_np, prev_gamma, ema = gamma_smoothing_ema)
 
-    # ---- Compute weights (numpy) ----
-    weights_np = compute_subdom_weights(
-        gamma_np, dual_rows_np, dual_cols_np,
-        method=weight_method,
-        backend="numpy"
-    )
+    diag = gamma_objective_and_stability(gamma_np, S_np, prev_gamma = prev_gamma)
+    S_diagnostics = cost_gap_diagnostics(S_np)
 
-    # ---- Convert to torch if needed ----
     if backend == "torch":
-        gamma_t  = torch.tensor(gamma_np, device=device, dtype=torch.float32)
-        dual_r_t = torch.tensor(dual_rows_np, device=device, dtype=torch.float32) if dual_rows_np is not None else None
-        dual_c_t = torch.tensor(dual_cols_np, device=device, dtype=torch.float32) if dual_cols_np is not None else None
-        weights_t = torch.tensor(weights_np, device=device, dtype=torch.float32)
+        gamma_t = torch.tensor(gamma_np, device=device, dtype=torch.float32)
     else:
-        gamma_t = dual_r_t = dual_c_t = weights_t = None
+        gamma_t = None
 
     return {
-        # original outputs
-        #"S_prepared_np": S_pre,
-        #"tau": final_tau,
         "gamma_np": gamma_np,
-        "dual_rows_np": dual_rows_np,
-        "dual_cols_np": dual_cols_np,
-
-        # new: torch versions
         "gamma_torch": gamma_t,
-        "dual_rows_torch": dual_r_t,
-        "dual_cols_torch": dual_c_t,
-
-        # new: weights
-        "weights_np": weights_np,
-        "weights_torch": weights_t,
+        "dual_rows_np": dual_r,
+        "dual_cols_np": dual_c,
+        "gamma_diagnostics": diag,
+        "S_diagnostics": S_diagnostics,
     }

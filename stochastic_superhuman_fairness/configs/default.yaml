@@ -9,6 +9,7 @@ log_dir: './runs'
 global:
   eval_freq: 5     # global fallback for evaluation frequency
 
+     # strings of variables to not record during training, by default gamma_matrix     
 # =========================
 # Fairness metric selection
 # =========================
@@ -22,7 +23,8 @@ metrics:
 subdominance:
   # type: bayesian  # standard | stochastic
   mode: absolute
-  rollout_aggregate: sum
+  feat_reduce: sum # sum, mean, max, l2. How the feature dims are combined to generate subdom, per rollout
+  rollout_aggregate: sum # How
   alpha: [1.,1.,1.,2.,30.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
   beta: 0. # If null defaults to 0
   adaptive_beta: false
@@ -44,8 +46,9 @@ demonstrator:
   # General
   compute_global: true
   join_train_eval: False # This can only work if train and eval are formed from equally sized datasets: train_ratio = 0.5
-  get_top_k:  # if not None, should be float in [0,1]
-  top_k_metric: 'beat_rate' # beat_rate, subdom
+  only_select_demos:    # a list of demo idxs to select. Idxs are the ranking order according to selection_metric
+  get_top_k:  # if not None, should be float in [0,1]. it is overrided by only_select_demos functionality if not none.
+  demo_selection_metric: 'beat_rate' # beat_rate, subdom, strictly_dominated, nondominated
   normalize: True # Constraint values
   normalize_mode: 'continuous'
   overwrite: False # True/ False. True will force regenerate the demos, even if they exist
@@ -57,13 +60,16 @@ demonstrator:
   save_format: "zip" # zip or npy. with npy a separate json metadata file is saved at data folder
   demo_sample: null
   # Set to true to construct diagnostic set with 50% demos 50% RANDOM DECISIONS
-  use_diagnostic_train: False
-  use_diagnostic_eval: False
+  use_diagnostic_train: False # semi_random, pareto_clean, False, None
+  use_diagnostic_eval: False  # semi_random, pareto_clean, False, None
 
 # =========================
 # Learner configuration
 # =========================
 learner:
+  logging:
+    no_record: #[gamma_matrix]
+
   schedule:
     - algo: subdominantLogistic #subdominantLogistic, subdominantmlp
       epochs: 2000
@@ -112,17 +118,25 @@ learner:
       stochastic:
         solver: 'mosek' # mosek, sinkhorn, mip_mosek
         weighted_S_matrix: False
-        indicator_func: 'match_sum' # median, mean, NOne, median_intrademo_subdom, match_sum
+        indicator_func: 'match_sum' # median, mean, NOne, median_intrademo_subdom, match_sum | soft_ adds use of sigmoid smoothing to indicators instead ob binary [0,1]
         row_constraints: False         # Bool
         col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking, policy_probs
         ot_temperature: 1.0
         gamma_temperature: 1.0
-        normalize_s_matrix: False
+        normalize_s_matrix: True
         renormalize_gamma: False
         compute_intrademo_ot_loss: True
+        coupling_cfg:
+          row_constraints: False         # Bool
+          col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking, policy_probs
+          ot_temperature: 1.0
+          gamma_temperature: 1.0
+          normalize_s_matrix: False
+          gamma_smoothing_ema: 0.8 # Controls impact of t-1 epoch's gamma. None for no temporal smoothing or ema~[0,1]
+
         loss_fn: 'weighted'
         loss_fn_kwargs: #for nested  dict be sure to include them into no_flatten_terms in line 88 base_model.py
-          term_weights: [1., 1]
+          term_weights: [1., 1.]
       bayesian:
         n_rollouts: 256
         dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn

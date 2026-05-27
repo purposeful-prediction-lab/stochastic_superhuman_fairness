@@ -602,10 +602,14 @@ def plot_zero_one_vs_features(
         all_y = np.concatenate([D[:, y_idx]] + [Xm[:, y_idx] for Xm in modes])
 
         pad_x = 0.05 * (all_x.max() - all_x.min() + 1e-12)
-        pad_y = 0.05 * (all_y.max() - all_y.min() + 1e-12)
+        #  pad_y = 0.05 * (all_y.max() - all_y.min() + 1e-12)
+        pad_y = 0.2 * all_y.max()
 
+        #  ax.set_xlim(all_x.min() - pad_x, all_x.max() + pad_x)
+        #  ax.set_ylim(-0.05, all_y.max() + pad_y)
         ax.set_xlim(all_x.min() - pad_x, all_x.max() + pad_x)
         ax.set_ylim(-0.05, all_y.max() + pad_y)
+
         #  ax.relim()
         #  ax.autoscale_view()
         set_axis_with_offset(ax, start_offset)

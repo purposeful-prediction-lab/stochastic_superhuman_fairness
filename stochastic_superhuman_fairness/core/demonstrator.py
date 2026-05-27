@@ -11,12 +11,13 @@ from stochastic_superhuman_fairness.core.data_defaults import DEFAULT_DATA_CONFI
 from stochastic_superhuman_fairness.core.fairness.fairness_metrics import METRIC_REGISTRY, zero_one_loss, compute_fairness_features
 from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features, compute_beat_rates
 from stochastic_superhuman_fairness.core.demonstrator_utils import AgreementStatsMixin
+from stochastic_superhuman_fairness.core.diagnostic_mixin import DiagnosticDemosMixin
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict, sample_logistic_model
 from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling, bj_from_beatrates_nocollapse
 
-class Demonstrator(AgreementStatsMixin):
+class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
     def __init__(self, cfg, auto_create: bool = True, to_torch: bool = True):
         self.cfg = normalize_cfg(cfg)
         self.dcfg = self.cfg.get('demonstrator')
@@ -41,7 +42,6 @@ class Demonstrator(AgreementStatsMixin):
 
         if auto_create:
             self.create_demos(to_torch = self.to_torch_flag)
-
             self._compute_standalone_demofeats()
             self._compute_standalone_demolabels()
         # Optionally keep a subset of the required fairness measures. 
@@ -55,15 +55,33 @@ class Demonstrator(AgreementStatsMixin):
             )
         # COmpute demo rankings and intrademo subdom
         self.compute_demo_ranking()
-        # Optionallly keep only thetop-k train demos based on 1) beat rates or 2) subdom 
-        if self.dcfg.get('get_top_k', None) is not None:
-            self.get_top_k(k = self.dcfg['get_top_k'], metric =self.dcfg['top_k_metric'])
+        # -----------------------------
+        # Optional Demo selection
+        # -----------------------------
+        demo_selection_metric = self.dcfg.get(
+            "demo_selection_metric",
+            self.dcfg.get("top_k_metric", "beat_rate"),  # backward compat
+        )
 
-        #  import ipdb;ipdb.set_trace()
+        if self.dcfg.get("only_select_demos", None) is not None:
+            self.select_demos_by_rank(
+                ranks=self.dcfg["only_select_demos"],
+                metric=demo_selection_metric,
+                split="train",
+                one_based=True,
+            )
+
+        elif self.dcfg.get("get_top_k", None) is not None:
+            self.get_top_k(
+                k=self.dcfg["get_top_k"],
+                metric=demo_selection_metric,
+                split="train",
+            )
+
         self.compute_intrademo_subdom()
         self.compute_intrademo_ot()
         self.compute_label_agreement_dict()
-
+        #  import ipdb;ipdb.set_trace()
     
     # --------------------------------------------------
     def compute_label_agreement_dict(self,  
@@ -89,8 +107,8 @@ class Demonstrator(AgreementStatsMixin):
         out = solve_stochastic_subdom_coupling(
             S_OT,
             solver=self.cfg.learner.default.train.stochastic.solver,
-            weight_method="primal",
-            normalize_subdom=False,
+            #  weight_method="primal",
+            normalize_s_matrix=False,
             demo_marginals=None,
             row_constraints=False,
         )
@@ -114,37 +132,75 @@ class Demonstrator(AgreementStatsMixin):
 
     # --------------------------------------------------
 
-    def get_top_k(
-    self,
-    k: float | int,
-    metric: Literal["beat_rate", "subdom", "sum_feats"] = "beat_rate",
-    split: Literal["train"] = "train",
+    # DEMO Selection Functions 
+    #==========================================================================================================================
+    def select_demos_by_rank(
+        self,
+        ranks: list[int],
+        metric: Literal[
+            "beat_rate",
+            "subdom",
+            "sum_feats",
+            "nondominated",
+            "strictly_dominated",
+        ] = "beat_rate",
+        split: Literal["train"] = "train",
+        one_based: bool = True,
     ):
-        """
-        Keep only top-k train demos in-place and refresh derived cached attributes.
+        if split != "train":
+            raise NotImplementedError("Only train demo selection is supported for now.")
 
-        k:
-          - 0 < k <= 1 : fraction of demos
-          - k > 1      : absolute number of demos
+        order = self._get_demo_order_by_metric(metric=metric, split=split)
+        n_order = len(order)
 
-        metric:
-          - beat_rate : higher is better
-          - subdom    : lower mean intrademo subdom is better
-          - sum_feats : lower total cost features is better
-        """
+        ranks = list(ranks)
+        pos = np.asarray(ranks, dtype=int) - 1 if one_based else np.asarray(ranks, dtype=int)
+
+        if np.any(pos < 0) or np.any(pos >= n_order):
+            raise IndexError(
+                f"Requested ranks {ranks} out of range for {n_order} ranked demos."
+            )
+
+        keep_idx = np.asarray(order[pos], dtype=int)
+
+        out = self._apply_train_demo_selection(
+            keep_idx,
+            selection_name="only_select_demos",
+            metric=metric,
+            extra_meta={
+                "only_select_demos": ranks,
+                "only_select_demos_one_based": one_based,
+            },
+        )
+
+        self.only_select_demos_ranks = ranks
+        self.only_select_demos_keep_idx = keep_idx
+        self.only_select_demos_metric = metric
+
+        return {
+            **out,
+            "ranks": ranks,
+        }
+
+    # ----------------------------------------------------------------------------
+
+    def get_top_k(
+        self,
+        k: float | int,
+        metric: Literal[
+            "beat_rate",
+            "subdom",
+            "sum_feats",
+            "strictly_dominated",
+            "nondominated",
+        ] = "beat_rate",
+        split: Literal["train"] = "train",
+    ):
         if split != "train":
             raise NotImplementedError("Only train cropping is supported for now.")
 
         if self.train_demos is None or len(self.train_demos) == 0:
             raise ValueError("No train demos loaded.")
-
-        # Make sure standalone arrays and intrademo S exist.
-        if not hasattr(self, "train_demo_feats"):
-            self._compute_standalone_demofeats()
-        if not hasattr(self, "train_demo_labels"):
-            self._compute_standalone_demolabels()
-        if not hasattr(self, "intra_S"):
-            self._compute_intra_demo_subdominance()
 
         n = len(self.train_demos)
         k = float(k)
@@ -156,55 +212,129 @@ class Demonstrator(AgreementStatsMixin):
         else:
             raise ValueError(f"k must be > 0, got {k}")
 
-        if metric == "beat_rate":
-            if not hasattr(self, "beat_rates_train"):
-                self.beat_rates_train = compute_beat_rates(self.intra_S)
-            scores = self.beat_rates_train
-            keep_idx = np.argsort(-scores)[:int_k]   # higher better
+        order = self._get_demo_order_by_metric(metric=metric, split=split)
+        keep_idx = np.asarray(order[:int_k], dtype=int)
 
-        elif metric == "subdom":
-            scores = self.intra_S.mean(axis=1)
-            keep_idx = np.argsort(scores)[:int_k]    # lower better
+        out = self._apply_train_demo_selection(
+            keep_idx,
+            selection_name="top_k_train",
+            metric=metric,
+            extra_meta={
+                "top_k_train": int_k,
+            },
+        )
 
-        elif metric == "sum_feats":
-            scores = np.asarray(self.train_demo_feats).sum(axis=1)
-            keep_idx = np.argsort(scores)[:int_k]    # lower cost better
-
-        else:
-            raise ValueError(f"Unknown top-k metric: {metric}")
-
-        keep_idx = np.asarray(keep_idx, dtype=int)
-
-        # Optional: preserve rank order in the cropped demoset.
-        self.train_demos = [self.train_demos[i] for i in keep_idx]
-
-        # Metadata/debugging.
-        self.top_k_train_original_n = n
+        self.top_k_train_original_n = out["n_before"]
         self.top_k_train_keep_idx = keep_idx
         self.top_k_train_metric = metric
+
+        return {
+            **out,
+            "k": int_k,
+        }
+
+    # -----------------------------------------------------------
+    # Demo Selection Helpers
+
+    def _apply_train_demo_selection(
+        self,
+        keep_idx,
+        *,
+        selection_name: str,
+        metric: str,
+        extra_meta: dict | None = None,
+    ):
+        keep_idx = np.asarray(keep_idx, dtype=int)
+
+        n_before = len(self.train_demos)
+        self.train_demos = [self.train_demos[i] for i in keep_idx]
         self.num_demos_train = len(self.train_demos)
 
         if hasattr(self, "meta") and self.meta is not None:
-            self.meta["top_k_train"] = int_k
-            self.meta["top_k_train_metric"] = metric
-            self.meta["top_k_train_original_n"] = n
+            self.meta[f"{selection_name}_metric"] = metric
+            self.meta[f"{selection_name}_original_n"] = n_before
+            self.meta[f"{selection_name}_keep_idx"] = keep_idx.tolist()
             self.meta["n_demos_train"] = len(self.train_demos)
 
-        # Rebuild derived arrays from the cropped demos.
+            if extra_meta:
+                self.meta.update(extra_meta)
+
         self._compute_standalone_demofeats()
         self._compute_standalone_demolabels()
-
-        # Remove stale sorted caches if they exist.
         self._clear_demo_derived_cache()
-        # recompute rankings/subdom on cropped set.
         self.compute_demo_ranking()
-        #  import ipdb;ipdb.set_trace()
+
         return {
             "keep_idx": keep_idx,
-            "n_before": n,
+            "n_before": n_before,
             "n_after": len(self.train_demos),
             "metric": metric,
-        }        
+        }
+
+    # -------------------------------------------------------------------
+
+    def _get_demo_order_by_metric(
+        self,
+        metric: Literal[
+            "beat_rate",
+            "subdom",
+            "sum_feats",
+            "nondominated",
+            "strictly_dominated",
+        ] = "beat_rate",
+        split: Literal["train"] = "train",
+    ):
+        if split != "train":
+            raise NotImplementedError("Only train demo selection is supported for now.")
+
+        if not hasattr(self, "train_demo_feats"):
+            self._compute_standalone_demofeats()
+        if not hasattr(self, "train_demo_labels"):
+            self._compute_standalone_demolabels()
+        if not hasattr(self, "intra_S"):
+            self._compute_intra_demo_subdominance()
+
+        if metric == "beat_rate":
+            if not hasattr(self, "beat_rates_train"):
+                self.beat_rates_train = compute_beat_rates(self.intra_S)
+            return np.argsort(-self.beat_rates_train)
+
+        elif metric == "subdom":
+            scores = self.intra_S.mean(axis=1)
+            return np.argsort(scores)
+
+        elif metric == "sum_feats":
+            scores = np.asarray(self.train_demo_feats).sum(axis=1)
+            return np.argsort(scores)
+
+        elif metric == "nondominated":
+            S = np.asarray(self.intra_S)
+            dominated = (S > 0).any(axis=0)
+            keep_idx = np.where(~dominated)[0]
+
+            if len(keep_idx) == 0:
+                if not hasattr(self, "beat_rates_train"):
+                    self.beat_rates_train = compute_beat_rates(self.intra_S)
+                return np.argsort(-self.beat_rates_train)
+
+            return keep_idx
+
+        elif metric == "strictly_dominated":
+            S = np.asarray(self.intra_S)
+            strictly_dominated = (S > 0) & (S.T == 0)
+            keep_idx = np.where(strictly_dominated.any(axis=0))[0]
+
+            if len(keep_idx) == 0:
+                if not hasattr(self, "beat_rates_train"):
+                    self.beat_rates_train = compute_beat_rates(self.intra_S)
+                return np.argsort(-self.beat_rates_train)
+
+            return keep_idx
+
+        else:
+            raise ValueError(f"Unknown demo selection metric: {metric}")
+
+    #==========================================================================================================================
 
     def _compute_standalone_demolabels(self):
         self.train_demo_labels = torch.stack([d["y_demo"] for d in self.train_demos])  # [D,K]      
@@ -1016,267 +1146,8 @@ class Demonstrator(AgreementStatsMixin):
         else:
             print("✅ Cached demos match current config.")
 
+    # -----------------------------------------------------------------------------------------------
 
-    # DIAGNOSTIC SET BUILDING
-    #===========================================================================================================
-
-    def _diagnostic_defaults(self):
-        dcfg = self.cfg.demonstrator
-        return {
-            "train_frac": float(getattr(dcfg, "diagnostic_train_frac", 0.5)),
-            "random_mult": float(getattr(dcfg, "diagnostic_random_mult", 0.5)),
-            "replace_train": bool(getattr(dcfg, "diagnostic_replace_train", False)),
-            "p_one": float(getattr(dcfg, "diagnostic_p_one", 0.5)),
-        }
-
-
-    def _build_demo_base_name(self):
-        cfg = self.cfg.demonstrator
-        demotype = getattr(cfg, "demotype", "partition")
-        if demotype == "fullset":
-            demotype = "lrdecisions"
-
-        extra = f"_type{demotype}"
-        if demotype == "lrdecisions":
-            n_models = getattr(cfg, "n_models", None)
-            subset_ratio = getattr(cfg, "subset_ratio", None)
-            subset_size = getattr(cfg, "subset_size", None)
-
-            if n_models is not None:
-                extra += f"_n{int(n_models)}"
-            if subset_ratio is not None:
-                extra += f"_sr{float(subset_ratio):.3g}"
-            if subset_size is not None:
-                extra += f"_ss{int(subset_size)}"
-
-        return (
-            f"{cfg.dataset}_demo{extra}"
-            f"_size{cfg.demo_size}"
-            f"_glob{cfg.compute_global}"
-            f"_norm{cfg.normalize}"
-            f"_sample{self.sample_id}"
-        )
-
-
-    def _build_diagnostic_name(
-        self,
-        split: str,
-        train_frac: float,
-        random_mult: float,
-        replace_train: bool,
-        p_one: float,
-    ):
-        base = self._build_demo_base_name()
-        return (
-            f"{base}"
-            f"_diag{split}"
-            f"_tf{train_frac:.3g}"
-            f"_rm{random_mult:.3g}"
-            f"_rt{replace_train}"
-            f"_p1{p_one:.3g}"
-        )
-
-
-    def _save_bundle(self, out: dict, np_path: Path, meta_path: Path):
-        save_format = getattr(self.cfg.demonstrator, "save_format", "separate")
-        meta_pure = to_pure(out["metadata"])
-
-        if save_format == "zip":
-            np.savez_compressed(np_path, **out)
-        else:
-            np.save(np_path, out)
-            safe_json_dump(meta_pure, meta_path)
-
-
-    def _load_bundle(self, np_path: Path, meta_path: Path):
-        save_format = getattr(self.cfg.demonstrator, "save_format", "separate")
-
-        if save_format == "zip":
-            out = np.load(np_path, allow_pickle=True)
-            return {
-                "train_demos": out["train_demos"].tolist() if "train_demos" in out else None,
-                "eval_demos": out["eval_demos"].tolist() if "eval_demos" in out else None,
-                "fairness": out["fairness"].tolist() if "fairness" in out else None,
-                "metadata": out["metadata"].tolist() if "metadata" in out else {},
-            }
-
-        out = np.load(np_path, allow_pickle=True).item()
-        if "metadata" not in out and meta_path.exists():
-            out["metadata"] = safe_json_load(meta_path)
-        return out
-
-
-    def _make_diagnostic_split(
-        self,
-        demos,
-        train_frac: float = 0.5,
-        random_mult: float = 0.5,
-        replace_train: bool = False,
-        p_one: float = 0.5,
-        seed: int | None = None,
-    ):
-        if not (0.0 <= train_frac <= 1.0):
-            raise ValueError("train_frac must be in [0,1]")
-        if not (0.0 <= random_mult <= 10.0):
-            raise ValueError("random_mult must be in [0,10]")
-        if demos is None or len(demos) == 0:
-            return []
-
-        rng = np.random.default_rng(seed)
-        n_total = len(demos)
-
-        n_keep = int(round(train_frac * n_total))
-        n_rand = int(round(random_mult * n_total))
-
-        if n_keep > 0:
-            chosen = rng.choice(n_total, size=n_keep, replace=replace_train)
-            real_demos = [demos[i] for i in chosen]
-        else:
-            real_demos = []
-
-        random_demos = []
-        for rid in range(n_rand):
-            src_id = int(rng.integers(0, n_total))
-            src = demos[src_id]
-
-            y_ref = src["y"]
-            X_ref = src["X"]
-            A_ref = src["A"]
-            idx_ref = src.get("indices", None)
-
-            y_demo = (rng.random(np.shape(y_ref)) < p_one).astype(np.float32)
-
-            fairness_feats = compute_fairness_features(
-                torch.as_tensor(y_ref, dtype=torch.float32),
-                torch.as_tensor(y_demo, dtype=torch.float32),
-                torch.as_tensor(A_ref, dtype=torch.float32),
-                metrics=self.cfg.demonstrator.metrics,
-                X=torch.as_tensor(X_ref, dtype=torch.float32),
-            ).detach().cpu().numpy()
-
-            random_demos.append({
-                "indices": idx_ref,
-                "X": X_ref,
-                "y": y_ref,
-                "A": A_ref,
-                "y_demo": y_demo,
-                "fairness_feats": fairness_feats,
-                "zero_one_loss": zero_one_loss(y_ref, y_demo),
-                "source_demo_id": src_id,
-                "random_demo_id": rid,
-                "is_random_demo": True,
-            })
-
-        for d in real_demos:
-            d.setdefault("is_random_demo", False)
-
-        mixed = real_demos + random_demos
-        rng.shuffle(mixed)
-        return mixed
-
-
-    def _load_or_create_diagnostic_split(self, base_demos, split: str):
-        params = self._diagnostic_defaults()
-
-        name = self._build_diagnostic_name(
-            split=split,
-            train_frac=params["train_frac"],
-            random_mult=params["random_mult"],
-            replace_train=params["replace_train"],
-            p_one=params["p_one"],
-        )
-
-        save_format = getattr(self.cfg.demonstrator, "save_format", "separate")
-        np_path = self.diagnostics_dir / (
-            f"{name}.npz" if save_format == "zip" else f"{name}.npy"
-        )
-        meta_path = self.diagnostics_dir / f"{name}_meta.json"
-
-        overwrite = bool(getattr(self.cfg.demonstrator, "overwrite", False))
-
-        if np_path.exists() and not overwrite:
-            print(f"📂 Loading cached diagnostic {split} demos from {np_path}")
-            out = self._load_bundle(np_path, meta_path)
-            demos = out["train_demos"] if split == "train" else out["eval_demos"]
-            if demos is not None:
-                return demos
-
-        seed_base = int(getattr(self.cfg, "seed", 0))
-        seed = seed_base if split == "train" else seed_base + 10000
-
-        diag_demos = self._make_diagnostic_split(
-            demos=base_demos,
-            train_frac=params["train_frac"],
-            random_mult=params["random_mult"],
-            replace_train=params["replace_train"],
-            p_one=params["p_one"],
-            seed=seed,
-        )
-
-        fairness = self._compute_fairness(diag_demos)
-        meta = {
-            **(self.meta if hasattr(self, "meta") and self.meta is not None else {}),
-            "is_diagnostic": True,
-            "diagnostic_split": split,
-            "diagnostic_train_frac": params["train_frac"],
-            "diagnostic_random_mult": params["random_mult"],
-            "diagnostic_replace_train": params["replace_train"],
-            "diagnostic_p_one": params["p_one"],
-            "n_base_demos": len(base_demos),
-            "n_diagnostic_demos": len(diag_demos),
-        }
-
-        out = {
-            "train_demos": diag_demos if split == "train" else None,
-            "eval_demos": diag_demos if split == "eval" else None,
-            "fairness": fairness,
-            "metadata": meta,
-        }
-        self._save_bundle(out, np_path, meta_path)
-        print(f"💾 Saved diagnostic {split} demos to {np_path}")
-        return diag_demos
-
-
-    def maybe_apply_diagnostics(self):
-        """
-        Post-processing step to be called after create_demos().
-        Replaces self.train_demos / self.eval_demos with diagnostic versions
-        only when the corresponding flags are enabled.
-        """
-        dcfg = self.cfg.demonstrator
-        use_train = bool(getattr(dcfg, "use_diagnostic_train", False))
-        use_eval = bool(getattr(dcfg, "use_diagnostic_eval", False))
-
-        if not use_train and not use_eval:
-            return {
-                "train_demos": self.train_demos,
-                "eval_demos": self.eval_demos,
-                "metadata": self.meta,
-            }
-
-        base_train = self.train_demos
-        base_eval = self.eval_demos
-
-        if use_train:
-            self.train_demos = self._load_or_create_diagnostic_split(base_train, split="train")
-
-        if use_eval:
-            self.eval_demos = self._load_or_create_diagnostic_split(base_eval, split="eval")
-
-        if hasattr(self, "meta") and self.meta is not None:
-            self.meta = {
-                **self.meta,
-                "use_diagnostic_train": use_train,
-                "use_diagnostic_eval": use_eval,
-                "n_demos_train": len(self.train_demos) if self.train_demos is not None else 0,
-                "n_demos_eval": len(self.eval_demos) if self.eval_demos is not None else 0,
-            }
-
-        return {
-            "train_demos": self.train_demos,
-            "eval_demos": self.eval_demos,
-            "metadata": self.meta,
-        }
     def join_train_eval_and_resplit(
         self,
         train_ratio: float | None = None,

@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression
+from dataclasses import is_dataclass
 
 @torch.no_grad()
 def sample_binary_from_probs(probs: torch.Tensor) -> torch.Tensor:
@@ -156,17 +157,16 @@ def dict_to_ns(d):
         return d
 
 def ns_to_dict(obj):
-    """
-    Recursively convert NamespaceDict / SimpleNamespace / objects
-    with __dict__ into plain Python dicts.
-    """
     if isinstance(obj, dict):
         return {k: ns_to_dict(v) for k, v in obj.items()}
 
     if isinstance(obj, (list, tuple)):
         return [ns_to_dict(v) for v in obj]
 
-    # NamespaceDict / SimpleNamespace / similar
+    # Don't unwrap dataclasses
+    if is_dataclass(obj):
+        return obj
+
     if hasattr(obj, "__dict__"):
         return {
             k: ns_to_dict(v)
@@ -174,7 +174,6 @@ def ns_to_dict(obj):
         }
 
     return obj
-
 def flatten_dict(d, parent_key="", sep=".", keep_path=True, no_flatten_terms: list = []):
     """
     Flatten a nested dictionary.
@@ -221,7 +220,6 @@ def minmax_normalize(S):
 
 def to_backend(x, like):
     """Convert x to backend/dtype/device of like (torch or numpy)."""
-    import numpy as np, torch
 
     if torch.is_tensor(like):                         # Torch backend
         if x is None: return None

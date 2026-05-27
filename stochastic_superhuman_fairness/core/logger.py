@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 import zipfile
 from stochastic_superhuman_fairness.core.utils import ns_to_dict
-from stochastic_superhuman_fairness.core.utils_io import save_dict_text, filter_dict_exclude
+from stochastic_superhuman_fairness.core.utils_io import save_dict_text, filter_dict_exclude, to_json_serializable
 
 def _is_dictlike(x):
     return isinstance(x, Mapping) or isinstance(x, SimpleNamespace)
@@ -191,11 +191,12 @@ class Logger:
 
     # ----------------------------------------------------------
     def log(self, record: dict, flatten: bool = False, keep_path: bool = True, verbose: bool = True, 
-            no_print: list = []):
+            no_print: list = [], no_record: list=[]):
 
-        no_print += ['time','algo','epoch','phase', 'gamma_matrix', 'demo_logprobs']
+        no_print += ['time','algo','epoch','phase', 'gamma_matrix', 'demo_logprobs', 'gamma_diagnostics']
 
-        record = {k: v for k, v in record.items() if (v is not None) and (k != 'gamma_matrix')}
+        #  record = {k: v for k, v in record.items() if (v is not None) and (k != 'gamma_matrix')}
+        record = {k: v for k, v in record.items() if (v is not None) and  (k not in no_record)}
         if flatten:
             record = flatten_record(record, keep_path=keep_path)
         record = {k: make_json_safe(v) for k, v in record.items()}
@@ -268,7 +269,7 @@ class Logger:
             zf.writestr("model_state.pt", buf.getvalue())
 
             # config
-            zf.writestr("config.json", json.dumps(cfg_dict, indent=2))
+            zf.writestr("config.json", json.dumps(to_json_serializable(cfg_dict), indent=2))
 
             # metadata
             zf.writestr("metadata.json", json.dumps(metadata, indent=2))

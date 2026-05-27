@@ -40,6 +40,7 @@ class BaseModel(ABC, nn.Module):
         # --- subdominance configuration ---
         scfg = cfg.get('subdominance', {})
         self.subdom_mode = scfg.get("mode", "absolute")
+        self.feat_reduce = scfg.get("feat_reduce", "sum")
         self.subdom_type = scfg.get("type", "standard")
         self.subdom_agg = scfg.get("rollout_aggregate", "mean")
         self.subdom_weight_mode = scfg.get("weight_mode", "softmax")  # or "linear"
@@ -534,58 +535,82 @@ class BaseModel(ABC, nn.Module):
         p_probs /= per_policy_rollout_logits.sum()
         return p_probs
 
-    def ensemble_logits_on_rollouts(
-        self,
-        X,
-        labels=None,
-        *,
-        device=None,
-        require_grad=True,
-    ):
+    def ensemble_logits_shared_X(self, X, *, device=None, require_grad=True):
         """
-        X:      (N, F) or (R, N, F) or (M, R, N, F)
-        labels: optional, (R, N) or (M, R, N), only used to infer R
-        returns logits: (M, R, N)
+        X: (N, F)
+        returns: logits (M, N)
         """
 
         device = device or next(self.parameters()).device
         X = X.to(device)
 
-        M = len(self.policies)
-
-        # infer R
-        if X.ndim == 2:
-            R = labels.shape[-2] if labels is not None and labels.ndim >= 2 else 1
-            X_in = X                                  # shared X: (N,F)
-        elif X.ndim == 3:
-            R = X.shape[0]
-            X_in = X                                  # (R,N,F)
-        elif X.ndim == 4:
-            R = X.shape[1]
-            X_in = X                                  # (M,R,N,F)
-        else:
-            raise ValueError(f"Bad X shape: {X.shape}")
-
         ctx = torch.enable_grad() if require_grad else torch.no_grad()
 
         outs = []
         with ctx:
-            for m, pol in enumerate(self.policies):
-                if X.ndim == 2:
-                    logits = pol(X_in).squeeze(-1)          # (N,)
-                    logits = logits[None, :].expand(R, -1)  # (R,N)
-
-                elif X.ndim == 3:
-                    R_, N, F = X_in.shape
-                    logits = pol(X_in.reshape(R_ * N, F)).squeeze(-1)
-                    logits = logits.reshape(R_, N)          # (R,N)
-
-                else:  # X.ndim == 4
-                    X_m = X_in[m]                           # (R,N,F)
-                    R_, N, F = X_m.shape
-                    logits = pol(X_m.reshape(R_ * N, F)).squeeze(-1)
-                    logits = logits.reshape(R_, N)          # (R,N)
-
+            for pol in self.policies:
+                logits = pol(X).squeeze(-1)   # (N,)
                 outs.append(logits)
 
-        return torch.stack(outs, dim=0).to(device)           # (M,R,N)
+        return torch.stack(outs, dim=0)        # (M, N)
+
+    #  def ensemble_logits_on_rollouts(
+    #      self,
+    #      X,
+    #      labels=None,
+    #      *,
+    #      device=None,
+    #      require_grad=True,
+    #      per_policy_output: bool = True,
+    #  ):
+    #      """
+    #      X:      (N, F) or (R, N, F) or (M, R, N, F)
+    #      labels: optional, (R, N) or (M, R, N), only used to infer R
+    #      returns logits: (M, R, N) or (M*R, N)
+    #      """
+    #
+    #      device = device or next(self.parameters()).device
+    #      X = X.to(device)
+    #
+    #      M = len(self.policies)
+    #
+    #      # infer R
+    #      if X.ndim == 2:
+    #          R = labels.shape[-2] if labels is not None and labels.ndim >= 2 else 1
+    #          X_in = X                                  # shared X: (N,F)
+    #      elif X.ndim == 3:
+    #          R = X.shape[0]
+    #          X_in = X                                  # (R,N,F)
+    #      elif X.ndim == 4:
+    #          R = X.shape[1]
+    #          X_in = X                                  # (M,R,N,F)
+    #      else:
+    #          raise ValueError(f"Bad X shape: {X.shape}")
+    #
+    #      ctx = torch.enable_grad() if require_grad else torch.no_grad()
+    #
+    #      outs = []
+    #      with ctx:
+    #          for m, pol in enumerate(self.policies):
+    #              if X.ndim == 2:
+    #                  logits = pol(X_in).squeeze(-1)          # (N,)
+    #                  logits = logits[None, :].expand(R, -1)  # (R,N)
+    #
+    #              elif X.ndim == 3:
+    #                  R_, N, F = X_in.shape
+    #                  logits = pol(X_in.reshape(R_ * N, F)).squeeze(-1)
+    #                  logits = logits.reshape(R_, N)          # (R,N)
+    #
+    #              else:  # X.ndim == 4
+    #                  X_m = X_in[m]                           # (R,N,F)
+    #                  R_, N, F = X_m.shape
+    #                  logits = pol(X_m.reshape(R_ * N, F)).squeeze(-1)
+    #                  logits = logits.reshape(R_, N)          # (R,N)
+    #
+    #              outs.append(logits)
+    #
+    #      import ipdb;ipdb.set_trace()
+    #      if per_policy_output:
+    #          return torch.stack(outs, dim=0).to(device)           # (M,R,N)
+    #      else:
+    #          return torch.stack(outs).to(device)           # (M*R,N)

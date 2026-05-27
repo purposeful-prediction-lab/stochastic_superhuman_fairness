@@ -18,6 +18,7 @@ from stochastic_superhuman_fairness.core.plotting.rollout_plots import(
         plot_zero_one_vs_features_demo_logprobs
         )
 from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_and_subdom
+from stochastic_superhuman_fairness.core.plotting.gamma_plots import plot_gamma_diagnostics_dashboard
 from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
 from stochastic_superhuman_fairness.core.plotting.plotting_palettes import MODE_PALETTE_100_PAPERSAFE, MODE_PALETTE_100_MAXVAR
 from stochastic_superhuman_fairness.core.plotting.aux_plots import (
@@ -209,7 +210,6 @@ def main():
     # Each per_policy_rollouts traj demarks a new policy. We want the logits of each demo from each policy.
     # TODO: Demos are sorted now. Adddress that
     #  demos_traj_logporobs = trajectory_logprob(rb.logits[::per_policy_rollouts], demo_labels)
-    #  import ipdb;ipdb.set_trace()
 
     # Get rollout groupings
     rollout_groupings = rb.get_rollout_groupings_by_policy()
@@ -273,8 +273,7 @@ def main():
     out = solve_stochastic_subdom_coupling(
                 S,
                 solver= ot_solver,
-                weight_method="primal",
-                normalize_subdom=False,
+                normalize_s_matrix=False,
         )
     gamma_temp = cfg.learner.get('default').get('train').get('stochastic').get('gamma_temperature', 1.0)
     gamma_temp = 1.0
@@ -289,7 +288,8 @@ def main():
 
     # Plot Coupling for each mode and demo
     # =====================================================================================
-    demo_text_labels = np.arange(10).tolist() + [None] * (len(demo_feats)-10)
+    num_labels = 10 if 10 < len(demo_feats) else len(demo_feats)
+    demo_text_labels = np.arange(num_labels).tolist() + [None] * (len(demo_feats)- num_labels)
     mode_colors = mode_palette[:len(feats_by_mode)]
 
     fig, axes = plot_zero_one_vs_features_mode_coupling(
@@ -393,7 +393,6 @@ def main():
     #          normalize_subdom=False,
     #  )
     #  gamma_temp = cfg.learner.get('default').get('train').get('stochastic').get('gamma_temperature', 1.0)
-    #  #  import ipdb;ipdb.set_trace()
     #  gamma_temp = 1.0
     #
     #  fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -416,7 +415,7 @@ def main():
     logs = load_metrics_jsonl(log_dir)
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     scale = compute_intrademo_scale(logs)
-    fig, ax = plot_loss_and_subdom(logs,ax=axes[0], intrademo_scale = scale,  log_loss_scale = True,
+    fig, ax = plot_loss_and_subdom(logs,ax=axes[0], intrademo_scale = scale,  log_loss_scale = False,
                                    plot_freq=args.plot_freq)
     #  try:
     fig, ax = plot_paired_subdominance_curve(logs, ax = axes[1])
@@ -431,7 +430,6 @@ def main():
     # =====================================================================================
     logits = np.array(rb.logits[::per_policy_rollouts])
     demo_logprobs = ensemble_scores(logits, torch.stack(demo_labels), mode = 'prob', temperature  = 10., require_grad = False)
-    #  import ipdb;ipdb.set_trace()
     fig, ax = plot_zero_one_vs_features_demo_logprobs(
                     feats_by_mode,
                     demo_feats,
@@ -491,14 +489,25 @@ def main():
     # =====================================================================================
     # Save
     # This segment requires a 2x2 grid
-    fig, axes = plt.subplots(2, 2, figsize=(12, 5))
-    out_path = os.path.join(save_dir, "demos_info.png")
-    print(f'Saving demonstration info plot to {out_path}')
-    fig, _ = plot_label_agreement_stats(demo.label_agreement_dict, axes = (axes[0,0], axes[0,1]))
-    fig, _ = plot_label_agreement_stats(demo.label_agreement_dict, axes = (axes[1,0], axes[1,1]), split = 'eval')
+    try:
+        fig, axes = plt.subplots(2, 2, figsize=(12, 5))
+        out_path = os.path.join(save_dir, "demos_info.png")
+        print(f'Saving demonstration info plot to {out_path}')
+        fig, _ = plot_label_agreement_stats(demo.label_agreement_dict, axes = (axes[0,0], axes[0,1]))
+        fig, _ = plot_label_agreement_stats(demo.label_agreement_dict, axes = (axes[1,0], axes[1,1]), split = 'eval')
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+    except Exception as e:
+        print(f"Count not draw demo info plot, error: {e}.\n Skipping...")
+
+    # Plot all gamma diagnostics
+    #  try:
+    fig, out = plot_gamma_diagnostics_dashboard(logs)
+    out_path = os.path.join(save_dir, "gamma_plots.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
-
+    #  except:
+        #  print(f"\n Failed plotting Gamma diagnostics\n")
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -26,6 +26,7 @@ class Learner:
     """
     def __init__(self, cfg, demonstrator, logger=None):
         self.cfg = normalize_cfg(cfg)
+        self.lcfg = self.cfg['learner']['logging']
         self.demo = demonstrator
         self.logger = logger
         self.model = None
@@ -55,7 +56,7 @@ class Learner:
         return new_model
 
     # ----------------------------------------------------------
-    def _log(self, stats: Dict[str, Any], verbose: bool = True, no_print_keys: list = []):
+    def _log(self, stats: Dict[str, Any], verbose: bool = True, no_print_keys: list = [], no_record_keys: list=[]):
         """Pass metrics to logger (if available)."""
         if self.logger is not None:
             self.logger.log(stats, verbose = verbose, no_print = no_print_keys)
@@ -100,7 +101,8 @@ class Learner:
                     "stage": "train"
                 })
                 self.model.post_train()
-                self._log(stats_train, verbose = (ep % phase_cfg['train_print_freq'] == 0), no_print_keys=['per_mode'])
+                self._log(stats_train, verbose = (ep % phase_cfg['train_print_freq'] == 0), no_print_keys=['per_mode'],
+                          no_record_keys = self.lcfg['no_record'])
 
                 # ---- Conditional evaluation ----
                 if (ep + 1) % eval_freq == 0:

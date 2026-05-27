@@ -1,8 +1,13 @@
 import json
 from pathlib import Path
 from omegaconf import ListConfig, DictConfig, OmegaConf
-from pathlib import Path
 from types import SimpleNamespace
+import numpy as np
+import torch
+from dataclasses import is_dataclass, asdict
+from collections.abc import Mapping
+from omegaconf import OmegaConf, DictConfig, ListConfig
+
 
 # Pretty Print and Formatting Functions
 # =====================================================================================================
@@ -139,7 +144,67 @@ def to_pure(obj):
     else:
         return obj
 
+#
+# JSON IO
+#
 
+
+def to_json_serializable(obj):
+    """
+    Recursively convert object into JSON-serializable form.
+
+    Handles:
+    - dict / Mapping / NamespaceDict
+    - OmegaConf DictConfig / ListConfig
+    - dataclasses
+    - numpy arrays/scalars
+    - torch tensors
+    - lists / tuples / sets
+    """
+
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+
+    # OmegaConf
+    if OmegaConf is not None and isinstance(obj, (DictConfig, ListConfig)):
+        obj = OmegaConf.to_container(
+            obj,
+            resolve=True,
+            throw_on_missing=False,
+        )
+        return to_json_serializable(obj)
+
+    # Dataclass
+    if is_dataclass(obj):
+        return to_json_serializable(asdict(obj))
+
+    # Dict-like
+    if isinstance(obj, Mapping):
+        return {
+            str(k): to_json_serializable(v)
+            for k, v in obj.items()
+        }
+
+    # Sequences
+    if isinstance(obj, (list, tuple, set)):
+        return [to_json_serializable(v) for v in obj]
+
+    # NumPy
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+
+    if isinstance(obj, np.generic):
+        return obj.item()
+
+    # Torch
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().tolist()
+
+    # Namespace / simple object
+    if hasattr(obj, "__dict__"):
+        return to_json_serializable(vars(obj))
+
+    return str(obj)
 def safe_json_dump(data, path, indent=2):
     """
     Dump to JSON, automatically converting OmegaConf containers
@@ -212,3 +277,9 @@ def load_metrics_jsonl(path, return_df=False):
         return logs, df
 
     return logs
+
+# ========================================================================
+# Dataclass Utils
+def dataclass_from_dict(dc_cls, d):
+    fields = dc_cls.__annotations__.keys()
+    return dc_cls(**{k: d[k] for k in fields if k in d})
