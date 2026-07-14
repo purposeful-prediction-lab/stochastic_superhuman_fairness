@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-
+from stochastic_superhuman_fairness.core.utils_io import extract_log_key
+from matplotlib.colors import ListedColormap, BoundaryNorm
 # ==========================================================================================
 # Extraction Helpers
 # ==========================================================================================
@@ -212,35 +213,133 @@ def plot_top1_rollout_per_demo(
     epochs=None,
     *,
     ax=None,
-    cmap="tab20",
+    n_buckets: int | None = None,
+    palette: list[str] | None = None,
     title="Top-1 rollout per demo over time",
 ):
-    epochs = np.arange(len(gammas)) if epochs is None else epochs
+    gammas = np.asarray(gammas)
+    T, R, D = gammas.shape
+    epochs = np.arange(T) if epochs is None else np.asarray(epochs)
 
-    # shape: T, D
-    top1 = np.argmax(gammas, axis=1)
+    top1 = np.argmax(gammas, axis=1)  # [T, D]
 
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 4))
+    if n_buckets is None:
+        cmap, norm, label = "turbo", None, "Top rollout"
     else:
-        fig = ax.figure
+        if not (1 <= n_buckets <= R):
+            raise ValueError(f"n_buckets must be in [1, {R}]")
+
+        top1 = (top1 * n_buckets) // R
+
+        if palette is not None:
+            if len(palette) < n_buckets:
+                raise ValueError(
+                    f"palette has {len(palette)} colors but n_buckets={n_buckets}"
+                )
+            cmap = ListedColormap(palette[:n_buckets])
+        else:
+            base = plt.cm.tab10 if n_buckets <= 10 else plt.cm.tab20 if n_buckets <= 20 else plt.cm.turbo
+            cmap = ListedColormap(base(np.linspace(0, 1, n_buckets)))
+
+        norm = BoundaryNorm(np.arange(-0.5, n_buckets + 0.5), n_buckets)
+        label = "Rollout bucket"
+
+    fig, ax = plt.subplots(figsize=(8, 4)) if ax is None else (ax.figure, ax)
 
     im = ax.imshow(
         top1.T,
         aspect="auto",
         origin="lower",
+        interpolation="nearest",
         cmap=cmap,
-        extent=[epochs[0], epochs[-1], 0, top1.shape[1] - 1],
+        norm=norm,
     )
 
-    ax.set_title(title)
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("demo index")
-    fig.colorbar(im, ax=ax, label="argmax rollout")
+    ax.set(title=title, xlabel="Epoch", ylabel="Demo")
+
+    cbar = fig.colorbar(im, ax=ax, label=label)
+    if n_buckets is not None:
+        cbar.set_ticks(np.arange(n_buckets))
 
     return fig, ax
 
-# ----------------------------------------
+#--------------------------------------------------------
+def plot_top1_demo_per_rollout(
+    gammas,
+    epochs=None,
+    *,
+    ax=None,
+    n_buckets=None,
+    palette=None,
+    color_order="cold_to_warm",
+    title="Top-1 demo per rollout over time",
+):
+    gammas = np.asarray(gammas)
+
+    if gammas.ndim != 3:
+        raise ValueError(f"Expected [T,R,D], got {gammas.shape}")
+
+    T, R, D = gammas.shape
+    epochs = np.arange(T) if epochs is None else np.asarray(epochs)
+
+    if len(epochs) != T:
+        raise ValueError(f"epochs must have length {T}")
+
+    if color_order not in ("cold_to_warm", "warm_to_cold"):
+        raise ValueError("color_order must be 'cold_to_warm' or 'warm_to_cold'")
+
+    vals = np.argmax(gammas, axis=2)  # [T,R]
+
+    if n_buckets is None:
+        n_levels = D
+        colors = plt.cm.turbo(np.linspace(0, 1, max(D, 2)))
+        label = "Best demo"
+    else:
+        if not 1 <= n_buckets <= D:
+            raise ValueError(f"n_buckets must be in [1,{D}]")
+
+        vals = np.minimum((vals * n_buckets) // D, n_buckets - 1)
+        n_levels = n_buckets
+        colors = (
+            palette[:n_buckets]
+            if palette is not None
+            else plt.cm.coolwarm(np.linspace(0, 1, n_buckets))
+        )
+        label = "Demo bucket"
+
+    if color_order == "warm_to_cold":
+        colors = colors[::-1]
+
+    cmap = ListedColormap(colors)
+    norm = BoundaryNorm(np.arange(-0.5, n_levels + 0.5), n_levels)
+
+    fig, ax = plt.subplots(figsize=(8, 4)) if ax is None else (ax.figure, ax)
+
+    im = ax.imshow(
+        vals.T,
+        aspect="auto",
+        origin="lower",
+        interpolation="nearest",
+        cmap=cmap,
+        norm=norm,
+        extent=[epochs[0], epochs[-1], -0.5, R - 0.5],
+    )
+
+    ax.set(title=title, xlabel="Epoch", ylabel="Rollout")
+
+    cbar = fig.colorbar(im, ax=ax, label=label)
+
+    if n_buckets is not None:
+        edges = np.linspace(0, D, n_buckets + 1, dtype=int)
+        cbar.set_ticks(np.arange(n_buckets))
+        cbar.set_ticklabels([
+            f"{edges[i]}–{edges[i + 1] - 1}"
+            for i in range(n_buckets)
+        ])
+
+    return fig, ax
+
+#--------------------------------------------------------
 
 def plot_demo_entropy_over_time(
     gammas,
@@ -386,10 +485,10 @@ def plot_gamma_diagnostics_dashboard(
     gamma_keys='gamma_matrix',
     n_snapshots=4,
     topk=1,
+    palette = None,
     figsize=(18, 14),
 ):
     gammas, epochs = extract_gamma_series(logs, key=gamma_keys)
-
     fig = plt.figure(figsize=figsize)
     gs = fig.add_gridspec(6, 2)
 
@@ -397,17 +496,19 @@ def plot_gamma_diagnostics_dashboard(
     ax_rollout = fig.add_subplot(gs[0, 1])
     ax_top1 = fig.add_subplot(gs[1, 0])
     ax_entropy = fig.add_subplot(gs[1, 1])
-    ax_delta = fig.add_subplot(gs[2, 0])
+    ax_top1_d = fig.add_subplot(gs[2, 0])
     ax_topk = fig.add_subplot(gs[2, 1])
     ax_cluster = fig.add_subplot(gs[3, 0])
     ax_snapshot = fig.add_subplot(gs[3, 1])
     ax_stability_1 = fig.add_subplot(gs[4, 0])
     ax_stability_2 = fig.add_subplot(gs[4, 1])
     ax_Sgap = fig.add_subplot(gs[5, 0])
+    ax_delta = fig.add_subplot(gs[5, 1])
 
     plot_demo_coverage_over_time(gammas, epochs, ax=ax_demo)
     plot_rollout_activity_over_time(gammas, epochs, ax=ax_rollout)
-    plot_top1_rollout_per_demo(gammas, epochs, ax=ax_top1)
+    plot_top1_rollout_per_demo(gammas, epochs, ax=ax_top1, n_buckets = extract_log_key(logs, 'train/P', extract_num=1)[0], palette = palette)
+    plot_top1_demo_per_rollout(gammas, epochs, ax=ax_top1_d, n_buckets = None, palette = palette, color_order='warm_to_cold')
     plot_demo_entropy_over_time(gammas, epochs, ax=ax_entropy)
     plot_gamma_delta_norm(gammas, epochs, ax=ax_delta)
     plot_topk_sparsified_gamma(gammas, epochs, k=topk, ax=ax_topk)

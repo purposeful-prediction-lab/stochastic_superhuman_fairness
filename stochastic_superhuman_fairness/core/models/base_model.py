@@ -305,7 +305,138 @@ class BaseModel(ABC, nn.Module):
        return sample_actions_from_policy(self.policy, X, decision_threshold = decision_threshold,
                              return_logits=return_logits, return_probs=return_probs,require_grad=require_grad)
 
-    def evaluate(self, demonstrator, decision_threshold: float = 0.5, per_policy_rollouts : int = 20,
+    # --------------
+
+    def evaluate(
+        self,
+        demonstrator,
+        decision_threshold: float = 0.5,
+        per_policy_rollouts: int = 20,
+        stochastic: bool = False,
+        demo_split: str = "train",  # NEW: "eval" or "train"
+    ):
+        """
+        Evaluate either a single policy or multiple policies.
+
+        demo_split:
+            "eval"  -> use demonstrator.eval_demos / eval_demo_feats
+            "train" -> use demonstrator.train_demos / train_demo_feats
+
+        Returns aggregate metrics + per-policy metrics under key "per_policy".
+        """
+
+        if demo_split not in ("eval", "train"):
+            raise ValueError(f"demo_split must be 'eval' or 'train', got {demo_split}")
+
+        demonstrator.to_torch(self.device)
+
+        dct = demonstrator.__dict__
+
+        demos_key = f"{demo_split}_demos"
+        feats_key = f"{demo_split}_demo_feats"
+
+        demos = dct.get(demos_key, None)
+        demo_feats = dct.get(feats_key, None)
+
+        prefix = demo_split
+
+        if not demos:
+            return {
+                f"{prefix}/zero_one_loss": None,
+                f"{prefix}/mean_subdom": None,
+                f"{prefix}/std_subdom": None,
+                f"{prefix}/fairness": None,
+                "per_policy": [],
+            }
+
+        if demo_feats is None:
+            demo_feats = torch.as_tensor(
+                np.stack([d["fairness_feats"] for d in demos]),
+                dtype=torch.float32,
+                device=self.device,
+            )
+
+        # ensure demo_feats lives on device
+        if not torch.is_tensor(demo_feats):
+            demo_feats = torch.as_tensor(
+                demo_feats,
+                dtype=torch.float32,
+                device=self.device,
+            )
+        else:
+            demo_feats = demo_feats.to(self.device).float()
+
+        # ---- Concatenate selected demos ----
+        Xe = torch.cat([d["X"] for d in demos], dim=0).to(self.device)
+        ye = torch.cat([d["y"] for d in demos], dim=0).to(self.device)
+        Ae = torch.cat([d["A"] for d in demos], dim=0).to(self.device)
+
+        policies = self.get_policy()
+
+        with torch.no_grad():
+            logits = torch.stack([p(Xe).squeeze(-1) for p in policies], dim=0)
+            probs = torch.sigmoid(logits)
+
+            ye_b = ye.view(1, -1).expand_as(probs)
+            Ae_b = Ae.view(-1).squeeze(-1)
+
+            y_pred = (probs >= decision_threshold).float()
+            z1 = (y_pred != ye_b).float().mean(dim=1)
+
+            f_list = []
+            for i in range(probs.shape[0]):
+                f_list.append(
+                    compute_fairness_features(
+                        ye_b[i],
+                        probs[i],
+                        Ae_b,
+                        metrics=self.metrics_list,
+                    )
+                )
+
+            f_eval = torch.stack(f_list, dim=0)
+
+            subdom_out = subdominance_loss_from_features(
+                rollout_feats=f_eval,
+                demo_feats=demo_feats,
+                mode=self.subdom_mode,
+                agg=self.subdom_agg,
+                alpha=self.alpha,
+                beta=self.beta,
+                reduction="none",
+            )
+
+            S = subdom_out["S"]
+
+            mean_subdom_per = S.mean(dim=1)
+            std_subdom_per = S.std(dim=1)
+
+            mean_fair = f_eval.mean(dim=0)
+            agg_S = S.mean(dim=0)
+
+            agg_mean_subdom = float(agg_S.mean().item())
+            agg_std_subdom = float(agg_S.std().item())
+            agg_zero_one = float(z1.mean().item())
+
+        per_policy = []
+        prefix = 'eval'
+        for i in range(len(policies)):
+            per_policy.append({
+                f"{prefix}/zero_one_loss": float(z1[i].item()),
+                f"{prefix}/mean_subdom": float(mean_subdom_per[i].item()),
+                f"{prefix}/std_subdom": float(std_subdom_per[i].item()),
+                f"{prefix}/fairness": f_eval[i].detach().cpu().numpy().tolist(),
+            })
+
+        return {
+            f"{prefix}/zero_one_loss": agg_zero_one,
+            f"{prefix}/mean_subdom": agg_mean_subdom,
+            f"{prefix}/std_subdom": agg_std_subdom,
+            f"{prefix}/fairness": mean_fair.detach().cpu().numpy().tolist(),
+            "per_policy": per_policy,
+        }
+    # --------------
+    def evaluate_old(self, demonstrator, decision_threshold: float = 0.5, per_policy_rollouts : int = 20,
                     stochastic: bool = True):
         """
         Evaluate either a single policy (self.policy) or multiple policies (self.policies).
@@ -553,64 +684,3 @@ class BaseModel(ABC, nn.Module):
                 outs.append(logits)
 
         return torch.stack(outs, dim=0)        # (M, N)
-
-    #  def ensemble_logits_on_rollouts(
-    #      self,
-    #      X,
-    #      labels=None,
-    #      *,
-    #      device=None,
-    #      require_grad=True,
-    #      per_policy_output: bool = True,
-    #  ):
-    #      """
-    #      X:      (N, F) or (R, N, F) or (M, R, N, F)
-    #      labels: optional, (R, N) or (M, R, N), only used to infer R
-    #      returns logits: (M, R, N) or (M*R, N)
-    #      """
-    #
-    #      device = device or next(self.parameters()).device
-    #      X = X.to(device)
-    #
-    #      M = len(self.policies)
-    #
-    #      # infer R
-    #      if X.ndim == 2:
-    #          R = labels.shape[-2] if labels is not None and labels.ndim >= 2 else 1
-    #          X_in = X                                  # shared X: (N,F)
-    #      elif X.ndim == 3:
-    #          R = X.shape[0]
-    #          X_in = X                                  # (R,N,F)
-    #      elif X.ndim == 4:
-    #          R = X.shape[1]
-    #          X_in = X                                  # (M,R,N,F)
-    #      else:
-    #          raise ValueError(f"Bad X shape: {X.shape}")
-    #
-    #      ctx = torch.enable_grad() if require_grad else torch.no_grad()
-    #
-    #      outs = []
-    #      with ctx:
-    #          for m, pol in enumerate(self.policies):
-    #              if X.ndim == 2:
-    #                  logits = pol(X_in).squeeze(-1)          # (N,)
-    #                  logits = logits[None, :].expand(R, -1)  # (R,N)
-    #
-    #              elif X.ndim == 3:
-    #                  R_, N, F = X_in.shape
-    #                  logits = pol(X_in.reshape(R_ * N, F)).squeeze(-1)
-    #                  logits = logits.reshape(R_, N)          # (R,N)
-    #
-    #              else:  # X.ndim == 4
-    #                  X_m = X_in[m]                           # (R,N,F)
-    #                  R_, N, F = X_m.shape
-    #                  logits = pol(X_m.reshape(R_ * N, F)).squeeze(-1)
-    #                  logits = logits.reshape(R_, N)          # (R,N)
-    #
-    #              outs.append(logits)
-    #
-    #      import ipdb;ipdb.set_trace()
-    #      if per_policy_output:
-    #          return torch.stack(outs, dim=0).to(device)           # (M,R,N)
-    #      else:
-    #          return torch.stack(outs).to(device)           # (M*R,N)

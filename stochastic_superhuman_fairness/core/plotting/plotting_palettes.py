@@ -73,46 +73,83 @@ BASIC_PALETTE = [
     ]
 #================================================================
 
-def generate_paper_safe_mode_palette(n=100):
+
+def generate_paper_safe_mode_palette(
+    n=100,
+    include_blue=True,
+):
     """
-    Generate up to n distinct colors avoiding blue/cyan hues.
-    First colors are publication-friendly curated colors.
+    Generate up to n distinct publication-friendly colors.
+
+    The first ~20 colors are hand-picked to maximize distinguishability.
+    Remaining colors are generated automatically.
+
+    Parameters
+    ----------
+    n : int
+        Number of colors.
+    include_blue : bool
+        If False, removes blue/cyan colors from both the curated and
+        generated portions.
     """
 
-    # ---- curated publication colors first ----
+    # -------- curated colors --------
     palette = [
-        "#1b9e77", "#66a61e", "#4d9221",  # greens
-        "#a6761d", "#8c564b",             # browns
-        "#e7298a", "#d95f02",             # magenta / burnt orange
-        "#b2182b", "#7f0000",             # reds
-        "#6a3d9a",                        # purple
-        "#b15928", "#fb9a99", "#cab2d6",  # soft tones
-        "#fdbf6f", "#ff7f00",
-        "#e31a1c", "#a6d854", "#ffd92f"
+        "#1f77b4",  # blue
+        "#ff7f0e",  # orange
+        "#2ca02c",  # green
+        "#d62728",  # red
+        "#9467bd",  # purple
+        "#8c564b",  # brown
+        "#e377c2",  # pink
+        "#bcbd22",  # olive
+        "#17becf",  # cyan
+        "#7f7f7f",  # gray
+
+        "#aec7e8",  # light blue
+        "#ffbb78",  # light orange
+        "#98df8a",  # light green
+        "#ff9896",  # light red
+        "#c5b0d5",  # light purple
+        "#c49c94",  # light brown
+        "#f7b6d2",  # light pink
+        "#dbdb8d",  # light olive
+        "#9edae5",  # light cyan
+        "#c7c7c7",  # light gray
     ]
 
-    if n <= len(palette):
+    if not include_blue:
+        palette = [
+            c for i, c in enumerate(palette)
+            if i not in (0, 8, 10, 18)   # blue/cyan entries
+        ]
+
+    if len(palette) >= n:
         return palette[:n]
 
-    # ---- expand with evenly spaced HSV colors ----
-    extra_needed = n - len(palette)
+    # -------- generate the remainder --------
 
-    hues = np.linspace(0, 1, extra_needed * 3)  # oversample
+    hues = np.linspace(0, 1, 5 * n)
+
     for h in hues:
 
-        # skip blue/cyan region (~180°–260°)
-        if 0.5 <= h <= 0.72:
-            continue
+        if not include_blue:
+            # skip cyan-blue range
+            if 0.48 <= h <= 0.72:
+                continue
 
-        s = 0.65
-        v = 0.85
+        s = 0.60
+        v = 0.82
 
         r, g, b = colorsys.hsv_to_rgb(h, s, v)
-        hex_color = "#{:02x}{:02x}{:02x}".format(
-            int(r * 255), int(g * 255), int(b * 255)
+        color = "#{:02x}{:02x}{:02x}".format(
+            int(255 * r),
+            int(255 * g),
+            int(255 * b),
         )
 
-        palette.append(hex_color)
+        if color not in palette:
+            palette.append(color)
 
         if len(palette) >= n:
             break

@@ -655,10 +655,10 @@ def plot_paired_subdominance_curve(
     l3 = ax_right.plot(epochs, ratio, color = 'violet', linestyle="--", label=f"{pair_key} / S_mean")
 
     ax_left.set_xlabel("epoch")
-    ax_left.set_ylabel("value")
-    ax_right.set_ylabel("ratio")
+    ax_left.set_ylabel("OT and Mean Subdom")
+    ax_right.set_ylabel("OT/S_mean ratio")
     ax_left.tick_params(axis="y", labelcolor='blue')
-    ax_right.tick_params(axis="y", labelcolor='red')
+    ax_right.tick_params(axis="y", labelcolor='violet')
 
 
     ax_left.set_title(title)

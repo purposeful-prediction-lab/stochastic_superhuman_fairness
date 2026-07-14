@@ -417,21 +417,80 @@ def plot_rollouts_vs_demos_pairs(
     fig.suptitle(title)
     fig.tight_layout()
     return fig, axes
+
 # -----------------------------------------------------------------------------------------------
+
+def set_feature_axis_limits(
+    ax,
+    x,
+    y,
+    *,
+    axis_mode="data",   # "data" or "origin"
+    origin=(0.0, 0.0),
+    pad_frac=0.05,
+    min_pad=1e-6,
+    draw_origin=True,
+):
+    """
+    Set readable x/y limits for a feature-vs-zero-one axis.
+
+    axis_mode:
+        "data"   -> focus around observed min/max values
+        "origin" -> include origin in limits and draw origin axes
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+
+    if len(x) == 0 or len(y) == 0:
+        return
+
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = float(y.min()), float(y.max())
+
+    if axis_mode == "origin":
+        ox, oy = origin
+        x_min = min(x_min, ox)
+        x_max = max(x_max, ox)
+        y_min = min(y_min, oy)
+        y_max = max(y_max, oy)
+
+    elif axis_mode != "data":
+        raise ValueError("axis_mode must be 'data' or 'origin'")
+
+    x_range = max(x_max - x_min, min_pad)
+    y_range = max(y_max - y_min, min_pad)
+
+    x_pad = pad_frac * x_range
+    y_pad = pad_frac * y_range
+
+    ax.set_xlim(x_min - x_pad, x_max + x_pad)
+    ax.set_ylim(y_min - y_pad, y_max + y_pad)
+
+    if draw_origin and axis_mode == "origin":
+        ax.axhline(origin[1], color="0.65", lw=0.8, zorder=0)
+        ax.axvline(origin[0], color="0.65", lw=0.8, zorder=0)
+
 def plot_zero_one_vs_features(
     rollout_feats,                  # (R,K) or (M,R,K) or list of (r_m,K); last dim is zero_one
     demo_feats,                     # (D,K) where last entry is zero_one
     *,
-    ax = None,
+    ax=None,
     feature_names=None,             # length K-1
     baselines=None,                 # {name: array(K,)} optional, last entry is zero_one
     title="Zero-one vs Features",
-    start_offset=None,              # e.g. -0.05
+    start_offset=None,              # kept for interface compatibility; no longer needed for limits
+    axis_mode="data",               # NEW: "data" or "origin"
+    origin=(0.0, 0.0),              # NEW
+    pad_frac=0.05,                  # NEW
+    draw_origin=True,               # NEW
     mode_colors: list = None,
     plot_demos_as_text=False,
     plot_rollouts_as_text=False,
     demo_text_labels=None,          # e.g. demo ranks
-    demo_colors = None,
+    demo_colors=None,
     rollout_text_labels=None,       # e.g. [[1,2,3], [4,5,6], ...] or custom strings
     fontsize_demos=8,
     fontsize_rollouts=8,
@@ -445,8 +504,15 @@ def plot_zero_one_vs_features(
     figsize_per_ax=(4.0, 3.5),
 ):
     """
-    Subplots: x = feature_k, y = zero_one (last entry).
-    Plots: rollouts (colored by mode), demos, mean_rollouts (red), mean_demos (cyan), baselines (optional).
+    Subplots:
+        x = feature_k
+        y = zero_one_loss, i.e. last feature entry
+
+    axis_mode:
+        "data"   -> focus tightly around min/max observed x and y values
+        "origin" -> include origin and draw x=0/y=0 axes
+
+    Always adds x/y padding for readability.
     """
 
     modes = normalize_rollout_modes(rollout_feats)     # list[(r_m,K)]
@@ -466,10 +532,13 @@ def plot_zero_one_vs_features(
     if baselines is not None:
         if not isinstance(baselines, dict):
             raise TypeError("baselines must be a dict[name -> array(K,)].")
+
         for name, v in baselines.items():
             b = _to_np(v).reshape(-1)
             if b.size != K:
-                raise ValueError(f"Baseline '{name}' must have length K={K}. Got {b.size}.")
+                raise ValueError(
+                    f"Baseline '{name}' must have length K={K}. Got {b.size}."
+                )
             baselines_list.append((name, b))
 
     n = K_feat
@@ -478,7 +547,8 @@ def plot_zero_one_vs_features(
 
     if ax is None:
         fig, axes = plt.subplots(
-            nrows, ncols,
+            nrows,
+            ncols,
             figsize=(figsize_per_ax[0] * ncols, figsize_per_ax[1] * nrows),
             squeeze=False,
         )
@@ -486,31 +556,42 @@ def plot_zero_one_vs_features(
     else:
         fig = ax.figure
 
-        # if a single parent axis was passed, subdivide it
+        # If a single parent axis was passed, subdivide it.
         if hasattr(ax, "get_subplotspec"):
             axes = make_inner_axes(ax, K_feat, figsize_per_ax=figsize_per_ax)
         else:
-            axes = np.asarray(ax).ravel()    
+            axes = np.asarray(ax).ravel()
 
-    # paper-friendly, avoid red/blue/orange (use your palette; red reserved for rollout mean)
-    mode_colors = cycle_palette_colors(M, mode_palette_MAXVAR) if mode_colors is None else mode_colors
+        if len(axes) < K_feat:
+            raise ValueError(f"Need at least {K_feat} axes, got {len(axes)}")
 
-    # validate labels
+    mode_colors = (
+        cycle_palette_colors(M, mode_palette_MAXVAR)
+        if mode_colors is None
+        else mode_colors
+    )
+
     demo_text_labels = _validate_demo_labels(demo_text_labels, len(D))
     rollout_text_labels = _validate_rollout_mode_labels(rollout_text_labels, modes)
 
     for k in range(K_feat):
-        ax = axes[k]
+        axk = axes[k]
 
         # ---------------- rollouts ----------------
         for m, Xm in enumerate(modes):
             color_m = mode_colors[m % len(mode_colors)]
 
             if plot_rollouts_as_text:
-                labels_m = rollout_text_labels[m] if rollout_text_labels is not None else range(len(Xm))
+                labels_m = (
+                    rollout_text_labels[m]
+                    if rollout_text_labels is not None
+                    else range(len(Xm))
+                )
+
                 _plot_text_points(
-                    ax,
-                    Xm[:, k], Xm[:, y_idx],
+                    axk,
+                    Xm[:, k],
+                    Xm[:, y_idx],
                     labels_m,
                     color=color_m,
                     alpha=alpha_rollouts,
@@ -518,8 +599,9 @@ def plot_zero_one_vs_features(
                     zorder=1,
                 )
             else:
-                ax.scatter(
-                    Xm[:, k], Xm[:, y_idx],
+                axk.scatter(
+                    Xm[:, k],
+                    Xm[:, y_idx],
                     s=s_rollouts,
                     alpha=alpha_rollouts,
                     marker="o",
@@ -528,11 +610,13 @@ def plot_zero_one_vs_features(
                     zorder=1,
                 )
 
-            # keep mode mean as marker
+            # mode mean
             mx = float(Xm[:, k].mean())
             my = float(Xm[:, y_idx].mean())
-            ax.scatter(
-                mx, my,
+
+            axk.scatter(
+                mx,
+                my,
                 s=s_means / 1.5,
                 marker="D",
                 alpha=1.0,
@@ -543,12 +627,13 @@ def plot_zero_one_vs_features(
         # ---------------- demos ----------------
         if plot_demos_as_text:
             labels_d = demo_text_labels if demo_text_labels is not None else range(len(D))
-            #  labels_d = demo_text_labels if demo_text_labels is not None else [None] * len(D)
+
             _plot_mixed_text_points(
-                ax,
-                D[:, k], D[:, y_idx],
+                axk,
+                D[:, k],
+                D[:, y_idx],
                 labels_d,
-                colors = demo_colors,
+                colors=demo_colors,
                 alpha_text=alpha_demos,
                 alpha_marker=alpha_demos,
                 fontsize=fontsize_demos,
@@ -557,18 +642,10 @@ def plot_zero_one_vs_features(
                 zorder_text=3,
                 zorder_marker=2,
             )
-            #  _plot_text_points(
-            #      ax,
-            #      D[:, k], D[:, y_idx],
-            #      labels_d,
-            #      color="black",
-            #      alpha=alpha_demos,
-            #      fontsize=fontsize_demos,
-            #      zorder=2,
-            #  )
         else:
-            ax.scatter(
-                D[:, k], D[:, y_idx],
+            axk.scatter(
+                D[:, k],
+                D[:, y_idx],
                 s=s_demos,
                 alpha=alpha_demos,
                 marker="x",
@@ -576,16 +653,35 @@ def plot_zero_one_vs_features(
                 zorder=2,
             )
 
-        # overall means
+        # ---------------- overall means ----------------
         mx_r, my_r = aggregate_mean_xy_over_modes(modes, k, y_idx)
         mx_d, my_d = float(D[:, k].mean()), float(D[:, y_idx].mean())
-        ax.scatter(mx_r, my_r, s=s_means, marker="*", color="red",  label="mean_rollouts", zorder=6)
-        ax.scatter(mx_d, my_d, s=s_means, marker="*", color="cyan", label="mean_demos",    zorder=6)
 
-        # baselines
+        axk.scatter(
+            mx_r,
+            my_r,
+            s=s_means,
+            marker="*",
+            color="red",
+            label="mean_rollouts",
+            zorder=6,
+        )
+
+        axk.scatter(
+            mx_d,
+            my_d,
+            s=s_means,
+            marker="*",
+            color="cyan",
+            label="mean_demos",
+            zorder=6,
+        )
+
+        # ---------------- baselines ----------------
         for name, b in baselines_list:
-            ax.scatter(
-                b[k], b[y_idx],
+            axk.scatter(
+                b[k],
+                b[y_idx],
                 s=s_baselines,
                 alpha=alpha_baselines,
                 marker=f"${name[0].upper()}$",
@@ -593,41 +689,44 @@ def plot_zero_one_vs_features(
                 zorder=7,
             )
 
-        ax.set_xlabel(feature_names[k])
-        ax.set_ylabel("zero_one_loss")
-        ax.grid(True, alpha=0.2)
+        axk.set_xlabel(feature_names[k])
+        axk.set_ylabel("zero_one_loss")
+        axk.grid(True, alpha=0.2)
 
-        # limits + optional offset, then origin axes
-        all_x = np.concatenate([D[:, k]] + [Xm[:, k] for Xm in modes])
-        all_y = np.concatenate([D[:, y_idx]] + [Xm[:, y_idx] for Xm in modes])
+        # ---------------- limits ----------------
+        all_x_parts = [D[:, k]] + [Xm[:, k] for Xm in modes]
+        all_y_parts = [D[:, y_idx]] + [Xm[:, y_idx] for Xm in modes]
 
-        pad_x = 0.05 * (all_x.max() - all_x.min() + 1e-12)
-        #  pad_y = 0.05 * (all_y.max() - all_y.min() + 1e-12)
-        pad_y = 0.2 * all_y.max()
+        for _, b in baselines_list:
+            all_x_parts.append(np.asarray([b[k]]))
+            all_y_parts.append(np.asarray([b[y_idx]]))
 
-        #  ax.set_xlim(all_x.min() - pad_x, all_x.max() + pad_x)
-        #  ax.set_ylim(-0.05, all_y.max() + pad_y)
-        ax.set_xlim(all_x.min() - pad_x, all_x.max() + pad_x)
-        ax.set_ylim(-0.05, all_y.max() + pad_y)
+        all_x = np.concatenate(all_x_parts)
+        all_y = np.concatenate(all_y_parts)
 
-        #  ax.relim()
-        #  ax.autoscale_view()
-        set_axis_with_offset(ax, start_offset)
-        draw_origin_axes(ax, origin=(0.0, 0.0))
+        set_feature_axis_limits(
+            axk,
+            all_x,
+            all_y,
+            axis_mode=axis_mode,
+            origin=origin,
+            pad_frac=pad_frac,
+            draw_origin=draw_origin,
+        )
 
-    for ax in axes[K_feat:]:
-        ax.axis("off")
+    # turn off unused axes
+    for ax_unused in axes[K_feat:]:
+        ax_unused.axis("off")
 
-    # one legend (first axis with data)
-    for ax in axes:
-        if ax.has_data():
-            ax.legend()
+    # one legend
+    for axk in axes:
+        if axk.has_data():
+            axk.legend()
             break
+
     if axes is not None and len(axes) > 0:
-            axes[0].set_title(title, loc="center", fontsize=12, fontweight="bold")
-    #  if ax is not None:
-    #      set_block_title(fig, axes, title)
-    #  fig.suptitle(title)
+        axes[0].set_title(title, loc="center", fontsize=12, fontweight="bold")
+
     fig.tight_layout()
     return fig, axes
 # -----------------------------------------------------------------------------------------------
@@ -1026,7 +1125,7 @@ def plot_zero_one_vs_features_mode_coupling(
 
     if created_fig and title is not None:
         fig.suptitle(title, y=0.995)
-        fig.tight_layout()
+        #  fig.tight_layout()
 
     return fig, axes
 

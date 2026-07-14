@@ -14,6 +14,7 @@ from stochastic_superhuman_fairness.core.fairness.fairness_metrics import comput
 from stochastic_superhuman_fairness.core.fairness.subdominance import (
         subdominant_logloss_shared_X_multi_rollout,  # the [R,N] logits version, reference
         subdominant_weighted_logloss_shared_X_multi_rollout,  # the [R,N] logits version, reference
+        behavior_guided_subdominant_spring_loss,
         compute_subdominance_matrix,
         compute_subdominance_matrix,
         )
@@ -123,6 +124,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         col_constraints: str = None, # None, rev_ranking
         ot_temperature: float = 1.0,
         gamma_temperature: float = 1.0,
+        sparse_gamma: bool = False,
         normalize_s_matrix: bool = True,
         stochastic_if_threshold: bool = False,
         alpha_updates: str = "analytical",
@@ -135,7 +137,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         coupling_cfg: CouplingConfig = CouplingConfig(),
         **kwargs,
     ):
-        #  import ipdb;ipdb.set_trace()
         '''This function assumes shared x among demos.'''
         demos = demonstrator.train_demos
         device = next(self.policies.parameters()).device
@@ -151,6 +152,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             dim=0
         )  # [D, N]
 
+        #  import ipdb;ipdb.set_trace()
         policies = self.policies
         P = len(policies)
         M = int(n_rollouts) if n_rollouts is not None else 1
@@ -167,12 +169,14 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             logits = pol(X).squeeze(-1)                      # [N]
             probs = torch.sigmoid(logits)                    # [N]
 
+            #  import ipdb;ipdb.set_trace()
             if (decision_threshold is not None) and (not stochastic_if_threshold):
                 yhat_batch = (probs.unsqueeze(0).expand(M, -1) >= decision_threshold).float()   # [M, N]
             else:
                 probs_batch = probs.unsqueeze(0).expand(M, -1)                                   # [M, N]
                 yhat_batch = torch.bernoulli(probs_batch)                                         # [M, N]
 
+            #  yhat_batch = torch.zeros_like(probs_batch)
             feat_batch = compute_fairness_features_batched_fast(
                 y_true=y_true,
                 y_pred_batch=yhat_batch,   # [M, N]
@@ -211,7 +215,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                 rollout_feats,
                 demonstrator.train_demo_means_sorted,
                 mode=self.subdom_mode,
-                reduce='mean'
+                #  reduce='mean'
+                reduce = getattr(self.cfg.get('subdominance', {}), "alpha_reduce", 'mean'),
             )
 
         S = compute_subdominance_matrix(
@@ -253,20 +258,18 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         S_OT = S * torch.tensor(bj_priors, device=S.device) if weighted_S_matrix else S
         out = solve_stochastic_subdom_coupling(
             S_OT,
+            P,   # num of policies in ensemple
             prev_gamma = None if self.old_gamma is None else self.old_gamma.detach().cpu().numpy(),
             demo_marginals=bj_priors,
             **asdict(coupling_cfg),
-            #  solver=solver,
-            #  weight_method="primal",
-            #  normalize_subdom=normalize_s_matrix,
-            #  row_constraints=row_constraints,
-            #  tau=ot_temperature,
         )
-        #  top1 = np.array(out['gamma_diagnostics']['top1'])
-        #  self.old_top1  =  top1 if self.old_top1 is None else self.old_top1
         gamma = gamma_temperature * torch.tensor(
             out["gamma_np"], device=device, dtype=torch.float32
         )  # [R,D]
+        if sparse_gamma:
+            max_idxs = gamma.argmax(dim=1, keepdim=True)
+            gamma.zero_()
+            gamma.scatter_(1, max_idxs, 1.0)
         S_demo_roll = compute_subdominance_matrix(
             demo_feats,
             rollout_feats.detach(),
@@ -303,8 +306,13 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             logits_rollouts = logits_rollouts.repeat_interleave(M, dim=0) # [P*M,N] = [R,N]
 
             #  import ipdb;ipdb.set_trace()
-            if loss_fn == 'weighted':
-                loss_out = subdominant_weighted_logloss_shared_X_multi_rollout(
+            if loss_fn == 'weighted' or loss_fn == 'bc_guided':
+                if loss_fn == 'weighted':
+                    loss_func = subdominant_weighted_logloss_shared_X_multi_rollout
+                else:
+                    loss_func = behavior_guided_subdominant_spring_loss
+
+                loss_out = loss_func(
                         S.detach(),
                         torch.tensor(S_rev_ji).detach().to(S.device),
                         logits_rollouts,  # [R,N]
@@ -323,7 +331,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     gamma=gamma,                      # [R,D]
                     indicator_win=indicator,          # [R,D]
                 )
-            if not no_update:
+            #  if not no_update:
+            if epoch < 2001:
                 self.optimizer.zero_grad(set_to_none=True)
                 loss_out.loss.backward()
                 self.optimizer.step()
@@ -347,6 +356,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     labels=y_demo,      # [D, N]
                     logits=loss_out.info['demo_logprobs'][:: n_rollouts],      # [D, N]
                     indicator_func = indicator_func,
+                    loss_fn_kwargs = loss_fn_kwargs,
                 )
 
         
@@ -379,11 +389,11 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     "S_diagnostics": out['S_diagnostics'],
                 }
 
-        #  import ipdb;ipdb.set_trace()
         if compute_intrademo_ot_loss:
             returns.update({"train/demo_baseline_dict": {'loss':demo_baseline_dict['loss_float'], 
                                                          'loss_per_model': demo_baseline_dict['loss_per_model_float']}})
         # Next iter assignments
+        #  import ipdb;ipdb.set_trace()
         self.old_gamma = gamma.detach()
 
         return returns
@@ -610,13 +620,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     criterion,        # [R]
                     **loss_fn_kwargs,
                 )
-                #  loss_out = subdominant_logloss_shared_X_multi_rollout(
-                #      logits_rollouts=logits[m],   # [D, N]
-                #      yhat_rollouts=labels,        # [D, N]
-                #      y_demo=labels,               # [D, N]
-                #      gamma=gamma,                 # [D, D]
-                #      indicator_win=indicator_win, # [D, D]
-                #  )
                 losses.append(loss_out.loss)
                 infos.append(getattr(loss_out, "info", {}))
 

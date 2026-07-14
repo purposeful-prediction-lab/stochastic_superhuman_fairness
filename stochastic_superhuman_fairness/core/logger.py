@@ -45,7 +45,7 @@ class Logger:
     Logs per-epoch metrics and saves model states at each phase transition.
     """
     
-    def __init__(self, base_dir="./runs", exp_name="experiment", seed=None):
+    def __init__(self, base_dir="./runs", exp_name="experiment", exp_tag = "", seed=None):
         self.completed = False
         self._cleanup_registered = False
         self.base_dir = base_dir
@@ -56,8 +56,9 @@ class Logger:
 
         run_id = self._next_run_id_locked()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        run_name = f"{exp_name}_{run_id:03d}_{timestamp}"
+        
+        exp_tag = f"{exp_tag}_" if exp_tag != "" else ""
+        run_name = f"{exp_name}_{run_id:03d}_{exp_tag}{timestamp}"
         if seed is not None:
             run_name += f"_seed{seed}"
 
@@ -234,7 +235,7 @@ class Logger:
         file_path = os.path.join(self.ckpt_dir, "configs.txt")
         save_dict_text(cfg_dict, path = file_path)
 
-    def save_checkpoint(self, model, phase_idx: int, algo: str, cfg):
+    def save_checkpoint(self, model, phase_idx: int, algo: str, cfg, state_dict_override=None):
         """
         Save a structured checkpoint:
           - model_state.pt   (tensors only)
@@ -249,8 +250,7 @@ class Logger:
         os.makedirs(self.ckpt_dir, exist_ok=True)
 
         # --- prepare artifacts ---
-        model_state = model.state_dict()
-
+        model_state = state_dict_override if state_dict_override is not None else model.state_dict()
         # cfg should already be NamespaceDict → convert to plain dict
         cfg_dict = ns_to_dict(cfg)
 
@@ -260,7 +260,6 @@ class Logger:
             "timestamp": datetime.now().isoformat(),
             "format_version": 1,
         }
-        #  import ipdb;ipdb.set_trace()
         # --- write zip ---
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             # model weights (tensors only → safe)
@@ -281,6 +280,7 @@ class Logger:
                     buf = io.BytesIO()
                     torch.save(dist_state, buf)
                     zf.writestr("dist_state.pt", buf.getvalue())
+            #  import ipdb;ipdb.set_trace()
 
         self.log({
             "event": "checkpoint",

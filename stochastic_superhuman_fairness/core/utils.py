@@ -209,6 +209,43 @@ def normalize_cfg(cfg):
     cfg_dict = OmegaConf.to_container(cfg, resolve=True) if OmegaConf.is_dict(cfg)  else cfg
     return dict_to_ns(cfg_dict)
 
+def sanitize_vector_param(x, K: int, like=None):
+    """
+    Normalize x to length K and match backend of `like`.
+
+    - scalar/list/np/torch → vector of length K
+    - crop if longer
+    - pad with last value if shorter
+    - output matches backend/dtype/device of `like`
+    """
+    if x is None:
+        return None
+
+    # First: convert to numpy for shape logic
+    if torch.is_tensor(x):
+        arr = x.detach().cpu().numpy()
+    else:
+        arr = np.asarray(x)
+
+    # scalar → vector
+    if arr.ndim == 0:
+        arr = np.full(K, float(arr))
+    else:
+        arr = arr.flatten()
+
+    # adjust length
+    if len(arr) > K:
+        arr = arr[:K]
+    elif len(arr) < K:
+        pad = np.full(K - len(arr), arr[-1])
+        arr = np.concatenate([arr, pad])
+
+    # Now convert back to desired backend
+    if like is None:
+        return arr.astype(np.float32)
+
+    return to_backend(arr, like)
+
 def minmax_normalize(S):
     S_min = np.min(S)
     S_max = np.max(S)

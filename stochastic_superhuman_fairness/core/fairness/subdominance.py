@@ -3,7 +3,7 @@ from typing import Literal, Optional, Tuple, Dict, Union
 from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
-
+from core.fairness.losses import ensemble_bc_loss
 
 try:
     import torch
@@ -106,7 +106,8 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
     criterion: torch.Tensor,
     eps: float = 1e-12,
     normalize_gamma: bool = False,
-    term_weights: list = [1., 1.]
+    term_weights: list = [1., 1.],
+    **kwargs,
 ) -> SubdomLossOut:
     """
     Implements:
@@ -155,14 +156,13 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
         reduction="none",
         )  # [R,D, N]
 
-    #  import ipdb;ipdb.set_trace()
     w_lose_ij = (gamma * (1.0 - I))             # [R,D]
     # Add a hinge term as well (sij - S_bar)+ for demo increase and (s_bar-sij)+ for the rollout term
     # New advantage like term
     l_advj = torch.clamp(S- criterion[:, None], 0)      #[R,D]
     loss_j =  (l_advj * w_lose_ij * bce_pair.sum(dim=2)).sum(axis=1)
     term2 = (loss_j).sum()
-
+    
     # Total loss
     loss = term_weights[0] * term1 + term_weights[1] * term2
     info = {
@@ -179,6 +179,47 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
         'demo_logprobs': bce_pair.detach(),
     }
     return SubdomLossOut(loss=loss, info=info)
+
+def behavior_guided_subdominant_spring_loss(
+    S,                                # [R,D]  rollout-demo subdominance matrix
+    S_rev,                                # [R,D]  rollout-demo subdominance matrix
+    logits_rollouts: torch.Tensor,    # [R,N] logits for shared X under each sampled theta_i
+    yhat_rollouts: torch.Tensor,      # [R,N] pseudo labels for each rollout i
+    y_demo: torch.Tensor,             # [D,N] demo labels for each demo j
+    gamma: torch.Tensor,              # [R,D]
+    indicator_win: torch.Tensor,      # [R,D] 1 if S_ij <= Srev_ji else 0
+    criterion: torch.Tensor,
+    eps: float = 1e-12,
+    normalize_gamma: bool = False,
+    term_weights: list = [1., 1.],
+    bc_lambda: float = 0.1,
+    **kwargs,
+) -> SubdomLossOut:
+
+    loss_out = subdominant_weighted_logloss_shared_X_multi_rollout(
+        S,
+        S_rev,
+        logits_rollouts,  # [R,N]
+        yhat_rollouts,    # [R,N]
+        y_demo,           # [D,N]
+        gamma,            # [R,D]
+        indicator_win,    # [R,D]
+        criterion,        # [R]
+        eps = eps,
+        normalize_gamma = normalize_gamma,
+        term_weights = term_weights,
+    )
+    import ipdb;ipdb.set_trace()
+    bc_loss, bc_info = ensemble_bc_loss(
+        logits_policies=logits_rollouts,
+        y_demo=y_demo,
+        demo_weights=None,
+    )
+    loss = loss_out.loss + bc_lambda * bc_loss
+    loss_out.info['bc_term'] = bc_loss.detach().cpu().item()
+    return SubdomLossOut(loss = loss, info = loss_out.info)
+
+
 # ---------------------------------------------------------------------------------
 
 def subdominance_loss_from_features(

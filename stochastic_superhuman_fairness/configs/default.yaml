@@ -4,6 +4,7 @@
 seed: 42
 device: cuda
 exp_name: # If none, this is the dataset name used: adult or compas
+exp_tag: # This appended to the exp name for further customization
 log_dir: './runs'
 
 global:
@@ -26,10 +27,11 @@ subdominance:
   feat_reduce: sum # sum, mean, max, l2. How the feature dims are combined to generate subdom, per rollout
   rollout_aggregate: sum # How
   alpha: [1.,1.,1.,2.,30.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
-  beta: 0. # If null defaults to 0
+  beta: 0.0 # If null defaults to 0
   adaptive_beta: false
   weight_mode: simple # simple, softmax, linear
   alpha_updates: static  #analytical, static
+  alpha_reduce: 'mean'   #mean, None, median
 
 # =========================
 # Demonstrator configuration
@@ -47,8 +49,8 @@ demonstrator:
   compute_global: true
   join_train_eval: False # This can only work if train and eval are formed from equally sized datasets: train_ratio = 0.5
   only_select_demos:    # a list of demo idxs to select. Idxs are the ranking order according to selection_metric
-  get_top_k:  # if not None, should be float in [0,1]. it is overrided by only_select_demos functionality if not none.
-  demo_selection_metric: 'beat_rate' # beat_rate, subdom, strictly_dominated, nondominated
+  get_top_k:  1. # if not None, should be float in [0,1]. it is overrided by only_select_demos functionality if not none.
+  demo_selection_metric: 'pareto_frontier' # beat_rate, subdom, pareto_frontier, nondominated
   normalize: True # Constraint values
   normalize_mode: 'continuous'
   overwrite: False # True/ False. True will force regenerate the demos, even if they exist
@@ -85,7 +87,7 @@ learner:
         policy_sources: ['random']
         policy_mixture: [1.]
         n_models: 10
-        init_noise_std: 0.1
+        init_noise_std: 0.8
       train:
         lr: 0.003
         batch_size: 100
@@ -117,21 +119,24 @@ learner:
       optimizer: 'adam' # adam, sgd
       stochastic:
         solver: 'mosek' # mosek, sinkhorn, mip_mosek
+        decision_threshold:  # set to None for stochastic (Bernoulli sampling) training rollouts
         weighted_S_matrix: False
         indicator_func: 'soft_match_sum' # median, mean, NOne, median_intrademo_subdom, match_sum | soft_ adds use of sigmoid smoothing to indicators instead ob binary [0,1]
         gamma_temperature: 1.0 # Can be used to sharpen gamma matrix after we get it from OT solver
+        sparse_gamma: False # Keeps only the max for each row (rollout) as 1 zeros out the rest
         renormalize_gamma: False
         compute_intrademo_ot_loss: True
         coupling_cfg:
-          row_constraints: False         # Bool
+          row_constraints: 'policy_budget'      # True, False, policy_budget
           col_constraints: 'rev_ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking, policy_probs
           S_tau: 1.0        # can be used to sharpen subdom matrix S before ot
           normalize_s_matrix: False
           gamma_smoothing_ema: 0.8 # Controls impact of t-1 epoch's gamma. None for no temporal smoothing or ema~[0,1]
 
-        loss_fn: 'weighted'
+        loss_fn: 'weighted' #  weighted, bc_guided
         loss_fn_kwargs: #for nested  dict be sure to include them into no_flatten_terms in line 88 base_model.py
           term_weights: [1., 1.]
+          bc_lambda: 0.2
       bayesian:
         n_rollouts: 256
         dist_mode: 'per_param_diag' # per_param_diag | per_layer_neuron_mvn | global_neuron_mvn

@@ -402,6 +402,7 @@ def collect_rollouts(
                         if decision_threshold is None:
                             raise ValueError("decision_threshold must be set for deterministic collection.")
                         y_hat = (probs >= decision_threshold).float()
+                        #  y_hat = torch.zeros_like(y_hat)
                 else:
                     Xd = d["X"].to(device)
                     if sample_actions_fn is not None:

@@ -7,6 +7,7 @@ class CouplingConfig:
     normalize_s_matrix: bool = True,
     row_constraints: bool = True
     row_constraints: Literal['rev_ranking', 'ranking', 'policy_probs', None] = 'rev_ranking',
+    col_constraints: Union[bool, Literal['policy_probs']] = True,
     S_tau: float = 1.0
     gamma_smoothing_ema: float = 0.9
     #  lambda_reg: float = 1e-8

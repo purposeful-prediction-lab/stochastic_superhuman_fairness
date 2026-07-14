@@ -38,6 +38,14 @@ class Learner:
         # Make sure each alho in the schedule is populated with default values from the default entry of config.
         # Shared keys with None values get assigned default values.
         self.schedule = validate_schedule(self.cfg.learner.schedule, cfg=self.cfg, device=self.device)
+        self.best_policy_scores = {
+            "zero_one": {},
+            "subdom": {},
+        }
+        self.best_model_state_dicts = {
+            "zero_one": None,
+            "subdom": None,
+        }
 
     # ----------------------------------------------------------
     def _transfer_parameters(self, old_model, new_model):
@@ -116,7 +124,13 @@ class Learner:
                     #  import ipdb;ipdb.set_trace()
                     self.model.post_eval(eval_stats)
                     self._log(eval_stats)
+                    # SAve best aggregate model
                     self.save_best_model(eval_stats, {**self.cfg, 'phase_cfg': phase_cfg}, algo_tag = algo, metric = 'eval/zero_one_loss')
+
+                    # Save best policy, to form a collection of the best versions of each policy head.
+                    self.update_best_policy_models(eval_stats, phase_idx, ep, algo)
+                    self.save_best_policy_models(phase_idx, algo, phase_cfg)
+
 
             # ----------------------
             # Save checkpoint per phase
@@ -131,7 +145,7 @@ class Learner:
         if self.best_metrics == {}:
             self.update_best_metrics(eval_stats)
         if eval_stats[metric] <= self.best_metrics[metric]['value']:
-            #  print(f"Saving best {metric} model as {}")
+            print(f"Saving best {metric} = {eval_stats[metric]}")
             self.logger.save_checkpoint(self.model, f"best_{metric.replace('/', '_')}", algo_tag, cfg=cfg)
         self.update_best_metrics(eval_stats)
 
@@ -151,7 +165,97 @@ class Learner:
                     for key in info_keys:
                         if key in eval_stats.keys(): 
                             self.best_metrics[k]['info'][key] = eval_stats[key]
+
+    # =========================================================
+    # Per Policy save apparatus
+    # =========================================================
+    def _copy_state_dict_cpu(self, module):
+        return {
+            k: v.detach().cpu().clone()
+            for k, v in module.state_dict().items()
+        }
+
+    def _copy_full_model_state_cpu(self):
+        return {
+            k: v.detach().cpu().clone()
+            for k, v in self.model.state_dict().items()
+        }
+
+
+    def _update_policy_slice(self, full_state_dict, policy_idx: int, policy_state: dict):
+        prefix = f"policies.{policy_idx}."
+        for k, v in policy_state.items():
+            full_state_dict[prefix + k] = v.detach().cpu().clone()
+
+
+    def update_best_policy_models(self, eval_stats: dict, phase_idx: int, epoch: int, algo: str):
+        """
+        Update full best-model state_dicts policy-by-policy.
+
+        Requires eval_stats["per_policy"] and self.model.policies.
+        """
+        if "per_policy" not in eval_stats:
+            return
+        if not hasattr(self.model, "policies"):
+            return
+
+        banks = {
+            "zero_one": "eval/zero_one_loss",
+            "subdom": "eval/mean_subdom",
+        }
+
+        for tag, metric_key in banks.items():
+            if self.best_model_state_dicts[tag] is None:
+                self.best_model_state_dicts[tag] = self._copy_full_model_state_cpu()
+
+            for i, pstats in enumerate(eval_stats["per_policy"]):
+                score = pstats[metric_key]
+
+                old = self.best_policy_scores[tag].get(i, None)
+                if old is None or score < old["score"]:
+                    if old is not None and tag == 'zero_one':
+                        print(f'Policy {i} improved: replacing params new {score} < {old["score"]}')
+                    policy_state = self._copy_state_dict_cpu(self.model.policies[i])
+
+                    self._update_policy_slice(
+                        self.best_model_state_dicts[tag],
+                        policy_idx=i,
+                        policy_state=policy_state,
+                    )
+
+                    self.best_policy_scores[tag][i] = {
+                        "score": score,
+                        "metric_key": metric_key,
+                        "epoch": epoch,
+                        "phase": phase_idx,
+                        "algo": algo,
+                        "metrics": pstats,
+                    }
+
+
+    def save_best_policy_models(self, phase_idx: int, algo: str, phase_cfg):
+        """
+        Save full loadable checkpoints for each best-policy bank.
+
+        Uses the same logger checkpoint format as aggregate checkpoints.
+        """
+        if self.logger is None:
+            return
+
+        for tag, state_dict in self.best_model_state_dicts.items():
+            if state_dict is None:
+                continue
+
+            self.logger.save_checkpoint(
+                self.model,
+                phase_idx,
+                f"per_policy_best_{tag}_{algo}",
+                cfg={**self.cfg, "phase_cfg": phase_cfg},
+                state_dict_override=state_dict,
+            )
+
     # ----------------------------------------------------------
+
     def get_model(self):
         """Return current trained model."""
         return self.model

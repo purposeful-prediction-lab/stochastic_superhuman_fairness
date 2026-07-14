@@ -81,13 +81,14 @@ def bj_from_beatrates_nocollapse(
 # ============================================================
 def _solve_qp_mosek_core(
     subdom_matrix: np.ndarray,
+    num_policies: int,
     rollout_marginals: np.ndarray | list = None,
     demo_marginals: np.ndarray | list = None,
     lambda_reg: float | None = None,
     normalize_s_matrix: bool = False,
     tau: float = 1.0,
     verbose: bool = True,
-    row_constraints: bool = False,
+    row_constraints: Literal[False, True, "policy_budget"] = False,
     col_constraints: bool = True,
 ):
     """
@@ -109,7 +110,6 @@ def _solve_qp_mosek_core(
         S = S * tau
     if lambda_reg is None:
         lambda_reg = 1e-6
-    #  import ipdb;ipdb.set_trace()
     # Reduce lampbda in unconstrained cases
     if not (row_constraints and col_constraints):
         lambda_reg = 0.0
@@ -151,16 +151,63 @@ def _solve_qp_mosek_core(
         task.putarow(constraint_idx, idx, [1.0]*n)
         task.putconbound(constraint_idx, mosek.boundkey.fx, 1.0, 1.0)
         constraint_idx += 1
-        # Row constraints (samples)
-        if row_constraints:
+
+        # Row / policy-budget constraints
+        if row_constraints is True:
+            # OLD behavior: each rollout row has fixed marginal p_samples[i]
             task.appendcons(num_samples)
+
             for i in range(num_samples):
-                idx = [i*num_demos + j for j in range(num_demos)]
-                task.putarow(constraint_idx + i, idx, [1.0]*num_demos)
-                task.putconbound(constraint_idx + i, mosek.boundkey.fx,
-                                 p_samples[i], p_samples[i])
+                idx = [i * num_demos + j for j in range(num_demos)]
+                task.putarow(constraint_idx + i, idx, [1.0] * num_demos)
+                task.putconbound(
+                    constraint_idx + i,
+                    mosek.boundkey.fx,
+                    p_samples[i],
+                    p_samples[i],
+                )
+
             constraint_idx += num_samples
 
+        elif row_constraints == "policy_budget":
+            # NEW behavior: each policy block gets total mass 1/M
+            if num_policies is None:
+                raise ValueError(
+                    "Pass num_policies=M when row_constraints='policy_budget'"
+                )
+
+            if num_samples % num_policies != 0:
+                raise ValueError(
+                    f"num_samples={num_samples} must be divisible by "
+                    f"num_policies={num_policies}"
+                )
+
+            rollouts_per_policy = num_samples // num_policies
+            task.appendcons(num_policies)
+
+            for m in range(num_policies):
+                row_start = m * rollouts_per_policy
+                row_end = (m + 1) * rollouts_per_policy
+
+                idx = [i * num_demos + j for i in range(row_start, row_end) for j in range(num_demos)]
+
+                task.putarow(constraint_idx + m, idx, [1.0] * len(idx))
+                task.putconbound(
+                    constraint_idx + m,
+                    mosek.boundkey.fx,
+                    1.0 / num_policies,
+                    1.0 / num_policies,
+                )
+
+            constraint_idx += num_policies
+
+        elif row_constraints is False:
+            pass
+
+        else:
+            raise ValueError(
+                "row_constraints must be one of: False, True, 'policy_budget'"
+            )
         # Column constraints (demos)
         if col_constraints:
             task.appendcons(num_demos)
@@ -284,6 +331,7 @@ def solve_qp_superhuman(
     epsilon=0.05,
     row_constraints=True,
     col_constraints=True,
+    num_policies: int | None = None,
     verbose=True,
 ):
     solver = solver.lower()
@@ -291,6 +339,7 @@ def solve_qp_superhuman(
     if solver == "mosek":
         return _solve_qp_mosek_core(
             subdom_matrix,
+            num_policies,
             rollout_marginals,
             demo_marginals,
             lambda_reg,
@@ -379,22 +428,21 @@ def gamma_objective_and_stability(
         abs_delta = float(np.linalg.norm(diff))
         rel_delta = float(abs_delta / (np.linalg.norm(prev_gamma) + eps))
 
-        # per-demo deltas, useful for your plots
+        # per-demo deltas, useful for visualizing training over time.
         abs_delta_per_demo = np.linalg.norm(diff, axis=0)
         prev_norm_per_demo = np.linalg.norm(prev_gamma, axis=0)
         rel_delta_per_demo = abs_delta_per_demo / (prev_norm_per_demo + eps)
 
         prev_top1 = np.argmax(prev_gamma, axis=0)
         curr_top1 = np.argmax(gamma, axis=0)
-        top1_flip = curr_top1 != prev_top1
-
+        top1_flips = stable_top1_flips(gamma, prev_gamma, tol=1e-10)
         out.update({
             "abs_delta": abs_delta,
             "rel_delta": rel_delta,
             "abs_delta_per_demo": abs_delta_per_demo.tolist(),
             "rel_delta_per_demo": rel_delta_per_demo.tolist(),
-            "top1_flip_rate": float(top1_flip.mean()),
-            "top1_flips": top1_flip.astype(int).tolist(),
+            "top1_flip_rate": float(np.array(top1_flips).mean()),
+            "top1_flips": top1_flips.astype(int).tolist(),
         })
 
     else:
@@ -423,12 +471,34 @@ def compute_weighted_flip(gamma, prev_gamma):
 
     return (flips * weight).mean()
 
+def stable_top1_flips(gamma, prev_gamma, tol=1e-10):
+    gamma = np.asarray(gamma)
+    prev_gamma = np.asarray(prev_gamma)
+
+    if np.allclose(gamma, prev_gamma, atol=tol, rtol=0.0):
+        return np.array(0.0)
+
+    def stable_argmax_cols(G):
+        col_max = G.max(axis=0, keepdims=True)
+        near_max = G >= col_max - tol
+
+        out = np.empty(G.shape[1], dtype=int)
+        for j in range(G.shape[1]):
+            candidates = np.where(near_max[:, j])[0]
+            out[j] = candidates[0]
+        return out
+
+    a = stable_argmax_cols(gamma)
+    b = stable_argmax_cols(prev_gamma)
+    flips = np.mean(a != b)
+    return np.array(flips)
 # -----------------------------------------------------------------------------
 # Main API (fixed preprocessing)
 # -----------------------------------------------------------------------------
 
 def solve_stochastic_subdom_coupling(
     S,
+    num_policies: int,
     solver="mosek",
     prev_gamma = None,
     rollout_marginals=None,
@@ -440,6 +510,7 @@ def solve_stochastic_subdom_coupling(
     row_constraints=True,
     col_constraints=True,
     gamma_smoothing_ema: float  = None,
+
     verbose=False,
 ):
     if torch.is_tensor(S):
@@ -462,7 +533,8 @@ def solve_stochastic_subdom_coupling(
         epsilon,
         row_constraints,
         col_constraints,
-        verbose,
+        num_policies = num_policies,
+        verbose = verbose,
     )
     
     #  import ipdb;ipdb.set_trace()

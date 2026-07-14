@@ -20,7 +20,7 @@ from stochastic_superhuman_fairness.core.plotting.rollout_plots import(
 from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_and_subdom
 from stochastic_superhuman_fairness.core.plotting.gamma_plots import plot_gamma_diagnostics_dashboard
 from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
-from stochastic_superhuman_fairness.core.plotting.plotting_palettes import MODE_PALETTE_100_PAPERSAFE, MODE_PALETTE_100_MAXVAR
+from stochastic_superhuman_fairness.core.plotting.plotting_palettes import MODE_PALETTE_100_PAPERSAFE, MODE_PALETTE_100_MAXVAR, generate_paper_safe_mode_palette
 from stochastic_superhuman_fairness.core.plotting.aux_plots import (
         plot_paired_subdominance_curve,
         plot_subdominance_heatmap, plot_optimal_transport_solution,
@@ -93,8 +93,8 @@ def main():
     ap.add_argument("--ref_model", type=str, default = None, help="Path to a reference model to be printed in the feature plots")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--phase", type=int, default=0)
-    ap.add_argument("--split", choices=["train", "eval"], default="eval")
-    ap.add_argument("--palette", choices=["paper", "vis"], default="vis")
+    ap.add_argument("--split", choices=["train", "eval"], default="train")
+    ap.add_argument("--no_blue_palette", action="store_true", help="Exclude blue from plots, as demos are blue to avoid confusion.")
     ap.add_argument("--ot_solver", choices=["mosek", "sinkhorn", None], default=None, help="OT solver. Default is whatever the model has in their config.")
     ap.add_argument("--per_policy_rollouts", type=int, default=10, help="Number of rollouts to collect, per policy.")
     #  ap.add_argument("--n_rollouts", type=int, default=100, help="Number of rollouts to collect (default: number of demos in split).")
@@ -129,7 +129,7 @@ def main():
         use_safe_load=True,
         overwrite_demos = False,
     )
-
+    #  import ipdb;ipdb.set_trace()
     model_name = print(args.archive.rsplit(os.path.sep,1)[-1]) if classify_arg(args.archive)  != 'name' else args._archive
     ot_solver = cfg.learner.default.train.stochastic.solver if args.ot_solver is None else args.ot_solver
 
@@ -151,9 +151,11 @@ def main():
             overwrite_demos = False,
         )
     # Choose mode plotting colors
-    mode_palette = MODE_PALETTE_100_PAPERSAFE if args.palette == 'paper' else MODE_PALETTE_100_MAXVAR
+    num_policies = len(model.policies)
+    mode_palette = generate_paper_safe_mode_palette(n=100, include_blue= not args.no_blue_palette)
     # Get Demos and Demo Feats
     s_train_demo_feats, s_eval_demo_feats = demo.get_rank_sorted_demo_feats()
+    #  import ipdb;ipdb.set_trace()
     if args.split == "train":
         demos_all = demo.train_demos 
         demo_feats = s_train_demo_feats
@@ -272,6 +274,7 @@ def main():
     # Plot OT Coupling
     out = solve_stochastic_subdom_coupling(
                 S,
+                num_policies,
                 solver= ot_solver,
                 normalize_s_matrix=False,
         )
@@ -323,19 +326,20 @@ def main():
                 demo_text_labels = None,
                 feature_names=feature_names,
                 title = f"{ref_model_name} Zero-one vs Features",
-                baselines = demo.meta['baseline_fairness_features'],
+                #baselines = demo.meta['baseline_fairness_features'],
                 mode_colors = mode_palette,
                 alpha_rollouts = args.r_opacity,
             )
         main_ax = axes[0]
     else:
         main_ax = None
+    #  import ipdb;ipdb.set_trace()
     fig2, _ = plot_zero_one_vs_features(
         feats_by_mode,
         demo_feats,
         ax = main_ax,
         feature_names=feature_names,
-        baselines = demo.meta['baseline_fairness_features'],
+        #  baselines = demo.meta['baseline_fairness_features'],
         mode_colors = mode_palette,
         alpha_rollouts = args.r_opacity,
     )
@@ -502,7 +506,7 @@ def main():
 
     # Plot all gamma diagnostics
     #  try:
-    fig, out = plot_gamma_diagnostics_dashboard(logs)
+    fig, out = plot_gamma_diagnostics_dashboard(logs, palette = mode_palette)
     out_path = os.path.join(save_dir, "gamma_plots.png")
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

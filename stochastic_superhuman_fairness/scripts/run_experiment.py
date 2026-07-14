@@ -5,6 +5,7 @@ import os
 from stochastic_superhuman_fairness.core.demonstrator import Demonstrator
 from stochastic_superhuman_fairness.core.learner import Learner
 from stochastic_superhuman_fairness.core.logger import Logger
+
 from pathlib import Path
 
 
@@ -26,7 +27,8 @@ def main(cfg: DictConfig):
     exp_name = cfg.get("exp_name", None)
     if exp_name is None:
         exp_name = cfg.get("demonstrator", {}).get('dataset', 'fairness_experiment')
-    logger = Logger(base_dir=cfg.get("log_dir", "./logs"), exp_name=exp_name)
+    logger = Logger(base_dir=cfg.get("log_dir", "./logs"), exp_name=exp_name, exp_tag = cfg.get("exp_tag", "")
+)
     logger.register_interrupt_cleanup()
     try:
         print("📦 Initializing Demonstrator...")

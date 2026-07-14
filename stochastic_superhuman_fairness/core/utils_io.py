@@ -7,7 +7,7 @@ import torch
 from dataclasses import is_dataclass, asdict
 from collections.abc import Mapping
 from omegaconf import OmegaConf, DictConfig, ListConfig
-
+from collections.abc import Sequence
 
 # Pretty Print and Formatting Functions
 # =====================================================================================================
@@ -278,6 +278,25 @@ def load_metrics_jsonl(path, return_df=False):
 
     return logs
 
+def extract_log_key(log, key, extract_num=None):
+    """
+    Extract up to `extract_num` values for `key` from a list of log dictionaries.
+
+    If extract_num is None, extract all occurrences.
+    Missing-key entries are skipped and do not count.
+    """
+    out = []
+
+    for entry in log:
+        if key not in entry:
+            continue
+
+        out.append(entry[key])
+
+        if extract_num is not None and len(out) >= extract_num:
+            break
+
+    return out
 # ========================================================================
 # Dataclass Utils
 def dataclass_from_dict(dc_cls, d):
