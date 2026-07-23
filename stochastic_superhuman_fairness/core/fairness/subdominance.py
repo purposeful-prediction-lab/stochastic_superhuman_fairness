@@ -180,6 +180,63 @@ def subdominant_weighted_logloss_shared_X_multi_rollout(
     }
     return SubdomLossOut(loss=loss, info=info)
 
+def subdominant_weighted_logloss_with_direct_subdom(
+    S,                                # [R,D]  hard subdominance (detached, binary features)
+    S_rev,                            # [R,D]  reverse subdominance (detached)
+    logits_rollouts: torch.Tensor,    # [R,N]
+    yhat_rollouts: torch.Tensor,      # [R,N]
+    y_demo: torch.Tensor,             # [D,N]
+    gamma: torch.Tensor,              # [R,D]
+    indicator_win: torch.Tensor,      # [R,D]
+    criterion: torch.Tensor,          # [R]
+    S_soft=None,                      # [R,D]  soft subdominance (differentiable, prob features)
+    lambda_direct: float = 0.1,
+    eps: float = 1e-12,
+    normalize_gamma: bool = False,
+    term_weights: list = [1., 1.],
+    **kwargs,
+) -> SubdomLossOut:
+    """
+    Wraps subdominant_weighted_logloss_shared_X_multi_rollout and adds a direct
+    differentiable subdominance term:
+
+      term3 = lambda_direct * sum_{i,j} gamma_ij * S_soft_ij
+
+    where S_soft is computed from probability-based (soft) fairness features,
+    giving a gradient path: logits -> probs -> soft_feats -> S_soft -> loss.
+
+    S and S_rev are hard (binary-feature) matrices used for the hinge weights
+    and indicator — they are detached and carry no gradient.
+    """
+    # terms 1 and 2: behavioral loss (gradient through logits -> BCE only)
+    loss_out = subdominant_weighted_logloss_shared_X_multi_rollout(
+        S,
+        S_rev,
+        logits_rollouts,
+        yhat_rollouts,
+        y_demo,
+        gamma,
+        indicator_win,
+        criterion,
+        eps=eps,
+        normalize_gamma=normalize_gamma,
+        term_weights=term_weights,
+        **kwargs,
+    )
+
+    # term 3: direct subdominance — gradient flows logits -> probs -> soft_feats -> S_soft
+    if S_soft is not None and lambda_direct > 0.0:
+        term3 = (gamma.detach() * S_soft).sum()
+        loss = loss_out.loss + lambda_direct * term3
+        loss_out.info["term3"] = float(term3.detach().cpu())
+    else:
+        loss = loss_out.loss
+        loss_out.info["term3"] = 0.0
+
+    loss_out.info["lambda_direct"] = lambda_direct
+    return SubdomLossOut(loss=loss, info=loss_out.info)
+
+
 def behavior_guided_subdominant_spring_loss(
     S,                                # [R,D]  rollout-demo subdominance matrix
     S_rev,                                # [R,D]  rollout-demo subdominance matrix
@@ -209,7 +266,7 @@ def behavior_guided_subdominant_spring_loss(
         normalize_gamma = normalize_gamma,
         term_weights = term_weights,
     )
-    import ipdb;ipdb.set_trace()
+    #  import ipdb;ipdb.set_trace()
     bc_loss, bc_info = ensemble_bc_loss(
         logits_policies=logits_rollouts,
         y_demo=y_demo,
@@ -230,6 +287,7 @@ def subdominance_loss_from_features(
     alpha=None,
     beta=None,
     reduction: Literal["mean", "sum", "none"] = "mean",
+    kernel_power: float = 1.0,
 ) -> Dict[str, object]:
     """
     High-level entry: compute S matrix, aggregate per rollout, then reduce to a scalar loss.
@@ -241,7 +299,7 @@ def subdominance_loss_from_features(
         "loss": scalar (or vector if reduction='none')
       }
     """
-    S = compute_subdominance_matrix(rollout_feats, demo_feats, mode=mode, alpha=alpha, beta=beta)
+    S = compute_subdominance_matrix(rollout_feats, demo_feats, mode=mode, alpha=alpha, beta=beta, kernel_power=kernel_power)
     per_rollout = aggregate_subdominance(S, agg=agg)
     #  import ipdb;ipdb.set_trace()
     # Reduction to scalar loss (default: mean over rollouts)
@@ -346,6 +404,16 @@ def build_indicator_from_subdom(
     """
     return (S + margin < S_ref).to(dtype=S.dtype)
 
+def _signed_pow(x, p, is_torch):
+    """sign(x) * |x|^p — preserves sign for any real p >= 0. p=1 is identity."""
+    if p == 1.0:
+        return x
+    if is_torch:
+        return torch.sign(x) * torch.abs(x) ** p
+    else:
+        return np.sign(x) * np.abs(x) ** p
+
+
 def compute_subdominance_matrix(
     rollout_feats,              # [R, K]
     demo_feats,                 # [D, K]
@@ -354,6 +422,7 @@ def compute_subdominance_matrix(
     beta=None,                  # scalar, [K], or [R,K] (optional)
     eps: float = 1e-12,
     feat_reduce: Literal['sum', 'mean', 'max'] = 'sum',
+    kernel_power: float = 2,  # only used when mode='kernel'
 ):
     """
     Compute pairwise subdominance S[r, d] between rollout r and demo d for K features.
@@ -364,6 +433,10 @@ def compute_subdominance_matrix(
 
     absolute:  S = ReLU( alpha * (f_r - f_d) + beta ) summed over K
     relative:  S = ReLU( alpha * ((f_r / f_d) - 1) + beta ) summed over K
+    kernel:    S = ReLU( alpha * sign(Δ)|Δ|^p + beta ) summed over K,  Δ = f_r - f_d
+               Signed power preserves one-sided semantics: negative Δ (rollout better than
+               demo) stays negative after the power → relu clips to 0, no penalty.
+               p>1 super-linear (large violations penalized harder), 0<p<1 sub-linear.
 
     Inputs may be torch tensors or numpy arrays; output matches the backend of rollout_feats.
     """
@@ -424,6 +497,8 @@ def compute_subdominance_matrix(
         else:
             denom = np.clip(df3, eps, None)
         core = alpha3 * ((rf3 / denom) - 1.0) + beta3
+    elif mode == "kernel":
+        core = alpha3 * _signed_pow(rf3 - df3, kernel_power, is_torch) + beta3
     else:
         raise ValueError(f"Unknown mode: {mode}")
     #  import ipdb;ipdb.set_trace()

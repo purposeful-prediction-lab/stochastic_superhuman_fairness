@@ -124,8 +124,9 @@ class Learner:
                     #  import ipdb;ipdb.set_trace()
                     self.model.post_eval(eval_stats)
                     self._log(eval_stats)
-                    # SAve best aggregate model
-                    self.save_best_model(eval_stats, {**self.cfg, 'phase_cfg': phase_cfg}, algo_tag = algo, metric = 'eval/zero_one_loss')
+                    # Save best aggregate model (zero-one loss and subdominance)
+                    self.save_best_model(eval_stats, {**self.cfg, 'phase_cfg': phase_cfg}, algo_tag=algo, metric='eval/zero_one_loss')
+                    self.save_best_model(eval_stats, {**self.cfg, 'phase_cfg': phase_cfg}, algo_tag=algo, metric='eval/mean_subdom')
 
                     # Save best policy, to form a collection of the best versions of each policy head.
                     self.update_best_policy_models(eval_stats, phase_idx, ep, algo)

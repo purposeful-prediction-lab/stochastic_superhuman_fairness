@@ -89,6 +89,18 @@ class NamespaceDict(SimpleNamespace):
                             setattr(self, key, value)
                 else:
                     setattr(self, key, value)
+    def update(self, other):
+        """
+        Update from either a plain dict or a NamespaceDict.
+        Converts dict to NamespaceDict recursively before delegating to update_from.
+        """
+        if isinstance(other, NamespaceDict):
+            self.update_from(other)
+        elif isinstance(other, dict):
+            self.update_from(to_namespace(other))
+        else:
+            raise TypeError(f"update expects a dict or NamespaceDict, got {type(other).__name__}")
+
     def copy(self):
         """Return a deep copy of this NamespaceDict."""
         def clone(obj):

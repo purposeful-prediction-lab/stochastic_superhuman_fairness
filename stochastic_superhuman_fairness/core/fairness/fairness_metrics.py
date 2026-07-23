@@ -197,6 +197,7 @@ def zero_one_loss(y_true, y_pred, *args, decision_threshold: float = 0.5):
         y_pred = (y_pred >= decision_threshold).astype(y_true.dtype)
 
     return float(np.mean(y_true != y_pred))
+
 # ============================================================
 # TORCH VERSIONS (fully differentiable)
 # ============================================================
@@ -303,77 +304,7 @@ def prediction_error_disparity_torch(y_true, y_pred, a, thresh: float = 0.5, alp
     e1 = err_rate(a1)
     return torch.abs(e0 - e1)
 #=========
-#
-#  def _torch_safe_mean(x):
-#      return x.float().mean() if x.numel() > 0 else torch.tensor(0.0, device=x.device)
-#
-#
-#  def demographic_parity_torch(y_pred, a):
-#      g0 = (a == 0)
-#      g1 = (a == 1)
-#      p0 = _torch_safe_mean(y_pred[g0.squeeze()])
-#      p1 = _torch_safe_mean(y_pred[g1.squeeze()])
-#      return (p0 - p1).abs()
-#
-#  def _mean_or_nan(x: torch.Tensor) -> torch.Tensor:
-#      return x.mean() if x.numel() > 0 else torch.tensor(float("nan"), device=x.device)
-#
-#  def equalized_odds_torch(y_true, y_pred, a):
-#      # Flatten to [N]
-#      y_pred = y_pred.view(-1)
-#      y_true = y_true.view(-1)
-#      a = a.view(-1)
-#
-#      # Binarize
-#      y_hat = (y_pred > 0.5)
-#      y = (y_true > 0.5) if y_true.is_floating_point() else (y_true > 0)
-#
-#      def rates(group_val: int):
-#          g = (a == group_val)
-#          pos = g & (y == 1)
-#          neg = g & (y == 0)
-#          tpr = _mean_or_nan(y_hat[pos].float())
-#          fpr = _mean_or_nan(y_hat[neg].float())
-#          return tpr, fpr
-#
-#      tpr0, fpr0 = rates(0)
-#      tpr1, fpr1 = rates(1)
-#
-#      eo = 0.5 * (torch.abs(tpr0 - tpr1) + torch.abs(fpr0 - fpr1))
-#      return eo
-#
-#  def equalized_odds_torch_old(y_true, y_pred, a):
-#      y_bin = (y_pred > 0.5).float()
-#      def rates(y_t, y_p, mask):
-#          mask = mask.squeeze(-1)
-#          pos = (y_t == 1) & mask
-#          neg = (y_t == 0) & mask
-#          TPR = _torch_safe_mean(y_p[pos])
-#          FPR = _torch_safe_mean(y_p[neg])
-#          return TPR, FPR
-#
-#      TPR0, FPR0 = rates(y_true, y_bin, a == 0)
-#      TPR1, FPR1 = rates(y_true, y_bin, a == 1)
-#      return ((TPR0 - TPR1).abs() + (FPR0 - FPR1).abs()) * 0.5
-#
-#
-#  def predictive_rate_parity_torch(y_true, y_pred, a):
-#      y_bin = (y_pred > 0.5).float()
-#
-#      def precision(y_t, y_p, mask):
-#          mask = mask.squeeze(-1)
-#          pred_pos = (y_p == 1) & mask
-#          return _torch_safe_mean(y_t[pred_pos])
-#
-#      prec0 = precision(y_true, y_bin, a == 0)
-#      prec1 = precision(y_true, y_bin, a == 1)
-#      return (prec0 - prec1).abs()
-#
-#  def prediction_error_disparity_torch(y_true, y_pred, a):
-#      err0 = _torch_safe_mean((y_pred != y_true)[a == 0])
-#      err1 = _torch_safe_mean((y_pred != y_true)[a == 1])
-#      return (err0 - err1).abs()
-#
+
 # Other Metrics ----------------------------------------------
 def zero_one_loss_torch(y_true, y_pred):
     """

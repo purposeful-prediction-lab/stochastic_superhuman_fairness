@@ -15,7 +15,6 @@ from stochastic_superhuman_fairness.core.demonstrator_utils import AgreementStat
 from stochastic_superhuman_fairness.core.diagnostic_mixin import DiagnosticDemosMixin
 from stochastic_superhuman_fairness.core.utils_io import safe_json_dump, safe_json_load, to_pure
 from stochastic_superhuman_fairness.core.utils import normalize_cfg, NamespaceDict, sample_logistic_model, sanitize_vector_param, ns_to_dict
-from stochastic_superhuman_fairness.core.fairness.subdominance import subdominance_loss_from_features
 from stochastic_superhuman_fairness.core.qp_solver import solve_stochastic_subdom_coupling, bj_from_beatrates_nocollapse
 
 class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
@@ -65,13 +64,13 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
             "demo_selection_metric",
             self.dcfg.get("top_k_metric", "beat_rate"),  # backward compat
         )
-        #  import ipdb;ipdb.set_trace()
         if self.dcfg.get("only_select_demos", None) is not None:
             self.select_demos_by_rank(
                 ranks=self.dcfg["only_select_demos"],
                 metric=demo_selection_metric,
                 split="train",
                 one_based=False,
+                close_tol=self.dcfg.get("close_tol", 0.02),
             )
 
         elif self.dcfg.get("get_top_k", None) is not None:
@@ -79,13 +78,13 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
                 k=self.dcfg["get_top_k"],
                 metric=demo_selection_metric,
                 split="train",
+                close_tol=self.dcfg.get("close_tol", 0.02),
             )
         # Need to recompute all parameters to account for subset selection from segment I, above.
         self.init_alpha_beta()
         self.compute_intrademo_subdom(alpha = self.alpha, beta = self.beta)
         self.compute_intrademo_ot(alpha = self.alpha, beta = self.beta)
         self.compute_label_agreement_dict()
-        #  import ipdb;ipdb.set_trace()
     
     # --------------------------------------------------
     def init_alpha_beta(self):
@@ -132,18 +131,27 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
         self.intrademo_gamma = out['gamma_np']
         self.intrademo_gamma_torch = torch.tensor(out['gamma_np']).to(device)
     # --------------------------------------------------
-    def compute_intrademo_subdom(self, alpha: float = None, beta = None, to_torch = True):
+    def compute_intrademo_subdom(self, alpha=None, beta=None, to_torch=True, mode: str = 'absolute'):
         '''Default alpha = all ones and beta 0. scalars are repeated to match feature dim K.
            Per rollout reduction is mean.
+           If cfg.subdominance.feature_based_subdom is True, forces mode='absolute' with
+           alpha=1 and beta=0 regardless of global subdominance settings.
         '''
+        if getattr(self.cfg.subdominance, 'feature_based_subdom', False):
+            K = len(self.metrics)
+            mode = 'absolute'
+            alpha = np.ones(K, dtype=np.float32)
+            beta = np.zeros(K, dtype=np.float32)
+
         keys = ['train', 'eval']
         device = 'cpu' if to_torch is False else 'cuda'
         for key in keys:
-            feats = self.__dict__[f'{key}_demo_feats'] 
+            feats = self.__dict__[f'{key}_demo_feats']
             self.__dict__[f'{key}_intrademo_subdom_dict'] = subdominance_loss_from_features(
                     feats, feats,
-                    alpha = alpha,
-                    beta = beta,
+                    mode=mode,
+                    alpha=alpha,
+                    beta=beta,
                     )
             self.__dict__[f'{key}_intrademo_S_torch'] =  torch.tensor(self.__dict__[f'{key}_intrademo_subdom_dict']['S']).to(device)
             self.__dict__[f'{key}_intrademo_subdom_dict']['median'] = np.median(
@@ -170,7 +178,7 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
         if split != "train":
             raise NotImplementedError("Only train demo selection is supported for now.")
 
-        order = self._get_demo_order_by_metric(metric=metric, split=split)
+        order = self._get_demo_order_by_metric(metric=metric, split=split, close_tol=close_tol)
         n_order = len(order)
 
         ranks = list(ranks)
@@ -214,6 +222,7 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
             "nondominated",
         ] = "beat_rate",
         split: Literal["train"] = "train",
+        close_tol: float =0.02,
     ):
         if split != "train":
             raise NotImplementedError("Only train cropping is supported for now.")
@@ -231,13 +240,16 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
         else:
             raise ValueError(f"k must be > 0, got {k}")
 
-        order = self._get_demo_order_by_metric(metric=metric, split=split)
+        order = self._get_demo_order_by_metric(metric=metric, split=split, close_tol=close_tol)
         keep_idx = np.asarray(order[:int_k], dtype=int)
 
         # NOTE: Keep only the froniter elemetns
-        import ipdb;ipdb.set_trace()
+        #  import ipdb;ipdb.set_trace()
         feats = self.train_demo_feats[keep_idx]
-        keep_idx = keep_idx[feats[:,1] < 0.4]
+        if self.dcfg.dataset == 'adult':
+            keep_idx = keep_idx[feats[:,1] < 0.24]
+        else:
+            keep_idx = keep_idx[feats[:,1] < 0.44]
 
         out = self._apply_train_demo_selection(
             keep_idx,
@@ -307,6 +319,7 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
             "pareto_frontier",
         ] = "beat_rate",
         split: Literal["train"] = "train",
+        close_tol: float = 0.02,
     ):
         if split != "train":
             raise NotImplementedError("Only train demo selection is supported for now.")
@@ -342,17 +355,10 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
                 return np.argsort(-self.beat_rates_train)
 
             return keep_idx
-
-        elif metric == "pareto_frontier":
+        elif "pareto_frontier" in metric:
             S = np.asarray(self.intra_S)
 
-            # i is strictly dominated by j iff:
-            # S[i, j] > 0 and S[j, i] == 0
-            strictly_dominated_by_someone = (S > 0) & (S.T == 0)
-
-            # keep i only if no j strictly dominates i
-            dominated = strictly_dominated_by_someone.any(axis=1)
-
+            dominated = ((S > 0) & (S.T == 0)).any(axis=1)
             keep_idx = np.where(~dominated)[0]
 
             if len(keep_idx) == 0:
@@ -360,6 +366,34 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
                     self.beat_rates_train = compute_beat_rates(self.intra_S)
                 return np.argsort(-self.beat_rates_train)
 
+            if "clean" in metric:
+                feats = np.asarray(self.train_demo_feats)[keep_idx]
+                sums = feats.sum(axis=1)
+                rng = np.random.default_rng(getattr(self.cfg, "seed", None))
+
+                # Lowest total feature sum gets priority.
+                # Exact sum ties are randomly ordered.
+                order = rng.permutation(len(keep_idx))
+                order = order[np.argsort(sums[order], kind="stable")]
+
+                selected = []
+
+                for candidate in order:
+                    if not selected:
+                        selected.append(candidate)
+                        continue
+
+                    distances = np.linalg.norm(
+                        feats[selected] - feats[candidate],
+                        axis=1,
+                    )
+
+                    if np.all(distances > close_tol):
+                        selected.append(candidate)
+
+                keep_idx = keep_idx[np.asarray(selected, dtype=int)]
+
+            #  import ipdb;ipdb.set_trace()
             return keep_idx
         else:
             raise ValueError(f"Unknown demo selection metric: {metric}")
@@ -418,19 +452,31 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
     def _compute_intra_demo_subdominance(self):
         if not hasattr(self, 'train_demo_feats'):
            self._compute_standalone_demofeats()
+        if getattr(self.cfg.subdominance, 'feature_based_subdom', False):
+            K = len(self.metrics)
+            mode = 'absolute'
+            alpha = np.ones(K, dtype=np.float32)
+            beta = np.zeros(K, dtype=np.float32)
+        else:
+            mode = self.cfg.subdominance.mode
+            alpha = self.alpha
+            beta = self.beta
+
         self.intra_S = subdominance_loss_from_features(
             self.train_demo_feats,  
             self.train_demo_feats, 
             agg='sum',
-            alpha = self.alpha,
-            beta = self.beta,
+            mode = mode,
+            alpha = alpha,
+            beta = beta,
             )['S']
         self.intra_S_eval = subdominance_loss_from_features(
             self.eval_demo_feats,  
             self.eval_demo_feats, 
             agg='sum',
-            alpha = self.alpha,
-            beta = self.beta,
+            mode = mode,
+            alpha = alpha,
+            beta = beta,
             )['S']
 
     def _resolve_defaults(self):
@@ -808,7 +854,8 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
 
             fairness_feats = compute_fairness_features(
                 torch.as_tensor(y, dtype=torch.float32), # y_true
-                torch.as_tensor(y_demo, dtype=torch.float32),
+                #  torch.as_tensor(y_demo, dtype=torch.float32),
+                torch.as_tensor(y_demo_zero_one, dtype=torch.float32),
                 torch.as_tensor(A, dtype=torch.float32),
                 metrics=cfg.metrics,
                 X = torch.as_tensor(X, dtype=torch.float32), # Currently unused
