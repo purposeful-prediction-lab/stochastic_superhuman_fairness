@@ -14,9 +14,10 @@ from stochastic_superhuman_fairness.core.plotting.demonstration_plots import(
         )
 from stochastic_superhuman_fairness.core.plotting.rollout_plots import(
         plot_rollouts_vs_demos_pairs, plot_zero_one_vs_features,
-        plot_zero_one_vs_features_mode_coupling, 
+        plot_zero_one_vs_features_mode_coupling,
         plot_zero_one_vs_features_demo_logprobs
         )
+from stochastic_superhuman_fairness.core.plotting.rollout_movies import animate_zero_one_vs_features
 from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_and_subdom
 from stochastic_superhuman_fairness.core.plotting.gamma_plots import plot_gamma_diagnostics_dashboard
 from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
@@ -107,6 +108,16 @@ def main():
     ap.add_argument("--zero_one_vs_feats_name", default="zero_one_vs_features.png")
     ap.add_argument("--plot_freq", type=int, default=1, help="Plot frequency for all the x vs epoch plots.")
     ap.add_argument("--losses_name", default="losses.png")
+    ap.add_argument("--no_anim", action="store_true", help="Skip building the zero_one_vs_features training movie.")
+    ap.add_argument("--anim_name", default="zero_one_vs_features_movie.gif")
+    ap.add_argument("--anim_fps", type=float, default=2, help="Frames per second for the training movie.")
+    ap.add_argument("--anim_match", choices=["gamma", "l2", "none"], default="gamma",
+                     help="Draw a line from each policy's aggregate point to its matched demo in the movie, "
+                          "matched by highest OT coupling mass (gamma) or nearest L2 distance. 'none' disables it.")
+    ap.add_argument("--top3_video", action="store_true",
+                     help="In the training movie, draw lines to each policy's top-3 matches (ranked by "
+                          "--anim_match) instead of just the best one. Rank 1 is solid, rank 2 dashed and "
+                          "half as opaque, rank 3 dotted and fainter still.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--r_opacity", type=float, default=.35)
     args = ap.parse_args()
@@ -417,6 +428,27 @@ def main():
     # =====================================================================================
     log_dir = os.path.join(os.path.dirname(os.path.abspath(args.archive)), '..', 'metrics_log.jsonl')
     logs = load_metrics_jsonl(log_dir)
+
+    # Plot Zero One vs Features Movie
+    # =====================================================================================
+    if not args.no_anim:
+        anim_out_path = os.path.join(save_dir, args.anim_name)
+        try:
+            _, _ = animate_zero_one_vs_features(
+                logs,
+                demo_feats,
+                #  demo.train_demo_feats,
+                feature_names=feature_names,
+                mode_colors=mode_palette[:num_policies],
+                alpha_rollouts=args.r_opacity,
+                save_path=anim_out_path,
+                fps=args.anim_fps,
+                match=None if args.anim_match == "none" else args.anim_match,
+                top_k=3 if args.top3_video else 1,
+            )
+        except ValueError as e:
+            print(f"[plot_all] Skipping training movie: {e}")
+
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     scale = compute_intrademo_scale(logs)
     fig, ax = plot_loss_and_subdom(logs,ax=axes[0], intrademo_scale = scale,  log_loss_scale = False,

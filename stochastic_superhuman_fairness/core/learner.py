@@ -111,6 +111,7 @@ class Learner:
                 self.model.post_train()
                 self._log(stats_train, verbose = (ep % phase_cfg['train_print_freq'] == 0), no_print_keys=['per_mode'],
                           no_record_keys = self.lcfg['no_record'])
+                self.save_best_model(stats_train, {**self.cfg, 'phase_cfg': phase_cfg}, algo_tag=algo, metric='train/loss')
 
                 # ---- Conditional evaluation ----
                 if (ep + 1) % eval_freq == 0:
@@ -143,8 +144,9 @@ class Learner:
 
     # ----------------------------------------------------------
     def save_best_model(self, eval_stats: dict, cfg: dict, metric: str = 'eval/zero_one_loss', algo_tag: str = ''):
-        if self.best_metrics == {}:
-            self.update_best_metrics(eval_stats)
+        self.update_best_metrics(eval_stats)
+        if metric not in eval_stats:
+            return
         if eval_stats[metric] <= self.best_metrics[metric]['value']:
             print(f"Saving best {metric} = {eval_stats[metric]}")
             self.logger.save_checkpoint(self.model, f"best_{metric.replace('/', '_')}", algo_tag, cfg=cfg)

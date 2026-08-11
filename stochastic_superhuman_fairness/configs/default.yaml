@@ -24,8 +24,8 @@ metrics:
 subdominance:
   # type: bayesian  # standard | stochastic
   mode: kernel # absolute, relative, kernel
-  feature_based_subdom: True # only affects intra demo subdom and selection
-  kernel_power: 1.3
+  feature_based_subdom: False # only affects intra demo subdom and selection
+  kernel_power: 2
   feat_reduce: sum # sum, mean, max, l2. How the feature dims are combined to generate subdom, per rollout
   rollout_aggregate: sum # How
   alpha: [1.,1.,1.,2.,30.] # Alpha defaults to 1. Alpha/beta scalars are broadcasted
@@ -78,7 +78,7 @@ learner:
   schedule:
     - algo: subdominantLogistic #subdominantLogistic, subdominantmlp
       epochs: 2000
-      eval_freq: 200
+      eval_freq: 2
       train_print_freq: 100
       model_cfg:
         post_eval_transfer: False
@@ -90,7 +90,7 @@ learner:
         policy_sources: ['random']
         policy_mixture: [1.]
         n_models: 8
-        init_noise_std: 1.6
+        init_noise_std: 1.2
       train:
         lr: 0.003
         batch_size: 100
@@ -126,19 +126,24 @@ learner:
         decision_threshold:  # set to None for stochastic (Bernoulli sampling) training rollouts
         weighted_S_matrix: False
         # indicator_func: 'soft_median_intrademo_subdom' # median, mean, NOne, median_intrademo_subdom, match_sum | soft_ adds sigmoid smoothing to indicators instead ob binary [0,1]
-        indicator_func: 'soft_match_sum' # median, mean, NOne, median_intrademo_subdom, match_sum | soft_ adds sigmoid smoothing to indicators instead ob binary [0,1]
+        indicator_func: 'median_intrademo_subdom' # median, mean, NOne, median_intrademo_subdom, match_sum | soft_ adds sigmoid smoothing to indicators instead ob binary [0,1]
         gamma_temperature: 1.0 # Can be used to sharpen gamma matrix after we get it from OT solver
         sparse_gamma: False # Keeps only the max for each row (rollout) as 1 zeros out the rest
         renormalize_gamma: False
         compute_intrademo_ot_loss: True
+        gamma_commit_freq: 1 # if greaterthan 1, set amount of epochs gamma stays fixed
+        adaptive_ema: True # if True, policies whose mean-S hasn't improved over plateau_window use stuck_ema instead of gamma_smoothing_ema
+        plateau_window: 20 # epochs of mean-S history used to detect a stuck policy
+        plateau_tol: 0.02 # relative improvement over plateau_window below which a policy is flagged stuck
+        stuck_ema: 0.3 # ema applied to stuck policies' gamma rows (lower = forgets a stale/unwinnable match faster)
         coupling_cfg:
           row_constraints: 'policy_budget'      # True, False, policy_budget
           col_constraints: 'ranking' #'rev_ranking' # Options : None(uniform), rev_ranking, ranking, policy_probs
           S_tau: 1.0        # can be used to sharpen subdom matrix S before ot
           normalize_s_matrix: False
-          gamma_smoothing_ema: 0.9 # Controls impact of t-1 epoch's gamma. None for no temporal smoothing or ema~[0,1]
+          gamma_smoothing_ema: 0.8 # Controls impact of t-1 epoch's gamma. None for no temporal smoothing or ema~[0,1]
 
-        loss_fn: 'direct' #  weighted, bc_guided
+        loss_fn: 'weighted' #  weighted, bc_guided
         loss_fn_kwargs: #for nested  dict be sure to include them into no_flatten_terms in line 88 base_model.py
           term_weights: [1., 1.]
           bc_lambda: 0.2

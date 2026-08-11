@@ -554,13 +554,13 @@ def plot_zero_one_vs_features(
         )
         axes = axes.ravel()
     else:
-        fig = ax.figure
-
         # If a single parent axis was passed, subdivide it.
         if hasattr(ax, "get_subplotspec"):
+            fig = ax.figure
             axes = make_inner_axes(ax, K_feat, figsize_per_ax=figsize_per_ax)
         else:
             axes = np.asarray(ax).ravel()
+            fig = axes[0].figure
 
         if len(axes) < K_feat:
             raise ValueError(f"Need at least {K_feat} axes, got {len(axes)}")

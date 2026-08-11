@@ -35,6 +35,7 @@ CURRENT_FILE = Path(__file__).resolve()
 CURRENT_DIR = CURRENT_FILE.parent
 # General Libs
 import copy
+from collections import deque
 from dataclasses import asdict
 
 class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
@@ -58,6 +59,9 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         # --- ensemble size ---
         self.n_models = int(self.model_cfg.get("n_models", 8))
         self.old_gamma = None
+        self.committed_gamma = None   # gamma fixed for gamma_commit_freq epochs
+        self._last_ot_out = None      # cached diagnostics from last OT solve
+        self._policy_S_hist = None    # per-policy rolling mean-S history, for adaptive_ema plateau detection
         self.old_top1 = None
 
         # --- create ensemble ---
@@ -136,6 +140,11 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         loss_fn_kwargs: dict = {},
         epoch: int = None,
         coupling_cfg: CouplingConfig = CouplingConfig(),
+        gamma_commit_freq: int = 1,   # recompute & commit gamma every N epochs; 1 = every epoch (default)
+        adaptive_ema: bool = False,   # if True, stuck policies (see plateau_window/tol) get stuck_ema instead of gamma_smoothing_ema
+        plateau_window: int = 20,     # epochs of mean-S history used to detect a stuck policy
+        plateau_tol: float = 0.02,    # relative improvement over the window below which a policy is "stuck"
+        stuck_ema: float = 0.3,       # ema applied to stuck policies' rows (lower = forgets stale gamma faster)
         **kwargs,
     ):
         '''This function assumes shared x among demos.'''
@@ -247,29 +256,51 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             s_probs = s_probs.reshape(-1, M).sum(axis=1) / s_probs.sum()
 
         # ----------------------------------------------------
-        # 4) OT solve -> gamma
+        # 4) OT solve -> gamma  (only every gamma_commit_freq epochs)
         # ----------------------------------------------------
-        # None = uniiform | rev_ranking ~ -e(T*beat_rate) | ranking ~ e(T*beat_rate)
+        ema = self.cfg.get('train').get('stochastic').get('coupling_cfg').gamma_smoothing_ema
+        # Track per-policy plateau state every epoch (independent of gamma_commit_freq) so history
+        # stays populated regardless of how often gamma is actually recommitted.
+        policy_stuck = self._update_policy_plateau_flags(S, P, M, plateau_window, plateau_tol) \
+            if adaptive_ema else None
+        # None = uniform | rev_ranking ~ -e(T*beat_rate) | ranking ~ e(T*beat_rate)
         if col_constraints == 'policy_probs':
             bj_priors = s_probs.repeat_interleave(M) / M
         else:
             bj_priors = bj_from_beatrates_nocollapse(demonstrator.beat_rates_train, rank_type = col_constraints)
 
-        S_OT = S * torch.tensor(bj_priors, device=S.device) if weighted_S_matrix else S
-        out = solve_stochastic_subdom_coupling(
-            S_OT,
-            P,   # num of policies in ensemple
-            prev_gamma = None if self.old_gamma is None else self.old_gamma.detach().cpu().numpy(),
-            demo_marginals=bj_priors,
-            **asdict(coupling_cfg),
-        )
-        gamma = gamma_temperature * torch.tensor(
-            out["gamma_np"], device=device, dtype=torch.float32
-        )  # [R,D]
-        if sparse_gamma:
-            max_idxs = gamma.argmax(dim=1, keepdim=True)
-            gamma.zero_()
-            gamma.scatter_(1, max_idxs, 1.0)
+        if self.committed_gamma is None or epoch % gamma_commit_freq == 0:
+            S_OT = S * torch.tensor(bj_priors, device=S.device) if weighted_S_matrix else S
+            out = solve_stochastic_subdom_coupling(
+                S_OT,
+                P,
+                prev_gamma=None if self.committed_gamma is None else self.committed_gamma.detach().cpu().numpy(),
+                demo_marginals=bj_priors,
+                **asdict(coupling_cfg),
+            )
+            gamma_new = gamma_temperature * torch.tensor(
+                out["gamma_np"], device=device, dtype=torch.float32
+            )  # [R,D]
+            if sparse_gamma:
+                max_idxs = gamma_new.argmax(dim=1, keepdim=True)
+                gamma_new.zero_()
+                gamma_new.scatter_(1, max_idxs, 1.0)
+            # EMA at commit time: smooth jump from previous committed gamma. Stuck policies (per
+            # policy_stuck) use stuck_ema instead of the global ema, so their coupling forgets a
+            # stale/unwinnable match faster while unstuck policies keep the stabler default.
+            if self.committed_gamma is not None:
+                if policy_stuck is not None:
+                    ema_per_policy = np.where(policy_stuck, stuck_ema, ema)  # [P]
+                    ema_row = torch.as_tensor(ema_per_policy, device=device, dtype=torch.float32)
+                    ema_row = ema_row.repeat_interleave(M).reshape(-1, 1)  # [R,1], row-aligned with policy blocks
+                else:
+                    ema_row = ema
+                self.committed_gamma = smooth_gamma(gamma_new, self.committed_gamma, ema=ema_row)
+            else:
+                self.committed_gamma = gamma_new
+            self._last_ot_out = out
+
+        gamma = self.committed_gamma
         S_demo_roll = compute_subdominance_matrix(
             demo_feats,
             rollout_feats.detach(),
@@ -298,7 +329,6 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
             and performing a gradient step.
         '''
 
-        ema = self.cfg.get('train').get('stochastic').get('coupling_cfg').gamma_smoothing_ema
         for mini_ep in range(n_mini_epochs):
 
             old_gamma = self.old_gamma.detach() if self.old_gamma is not None else gamma.detach()
@@ -370,7 +400,8 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                           'norm_paired_subdom': loss_out.info['norm_paired_subdom'],
                           'paired_subdom': loss_out.info['paired_subdom'],
                           'demo_logprobs':[loss_out.info['demo_logprobs'][m* n_rollouts].sum(dim=1).cpu().tolist() for m in range(P)],
-                          'loss_terms': [loss_out.info['term1'], loss_out.info['term2']]
+                          'loss_terms': [loss_out.info['term1'], loss_out.info['term2']],
+                          'policy_stuck': policy_stuck.tolist() if policy_stuck is not None else None,
                           }
 
         if compute_intrademo_ot_loss:
@@ -407,15 +438,15 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                     "train/D": int(D),
                     "train/l_terms": loss_term_dict,
                     "gamma_matrix": gamma,
-                    "gamma_diagnostics": out['gamma_diagnostics'],
-                    "S_diagnostics": out['S_diagnostics'],
+                    "gamma_diagnostics": self._last_ot_out['gamma_diagnostics'],
+                    "S_diagnostics": self._last_ot_out['S_diagnostics'],
                 }
 
         if compute_intrademo_ot_loss:
             returns.update({"train/demo_baseline_dict": {'loss':demo_baseline_dict['loss_float'], 
                                                          'loss_per_model': demo_baseline_dict['loss_per_model_float']}})
         # Next iter assignments
-        self.old_gamma = gamma.detach()
+        self.old_gamma = self.committed_gamma.detach()
 
         return returns
 
@@ -452,6 +483,30 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         else:
             out = (S < crit) if crit.ndim == 0 else (S < crit[:, None])
         return (out.float() if is_torch else out.astype(float), crit)
+
+    #--------------------------------------------------------------------------------------------------------
+
+    def _update_policy_plateau_flags(self, S: torch.Tensor, P: int, M: int, window: int, tol: float):
+        '''Tracks each policy's mean subdominance (to all demos) over a rolling window of the
+           last `window` epochs, and flags a policy as "stuck" once its relative improvement
+           over that window drops below `tol`. Called every epoch (independent of gamma_commit_freq)
+           so history stays populated regardless of how often gamma is actually recommitted.
+
+           Returns a bool np.ndarray [P]: True where the policy is considered stuck.
+        '''
+        if self._policy_S_hist is None or len(self._policy_S_hist) != P:
+            self._policy_S_hist = [deque(maxlen=window) for _ in range(P)]
+
+        s_per_policy = S.detach().reshape(P, M, -1).mean(dim=(1, 2)).cpu().numpy()  # [P]
+        stuck = np.zeros(P, dtype=bool)
+        for p in range(P):
+            hist = self._policy_S_hist[p]
+            if len(hist) == hist.maxlen:
+                s_start = hist[0]
+                rel_improve = (s_start - s_per_policy[p]) / (abs(s_start) + 1e-8)
+                stuck[p] = rel_improve < tol
+            hist.append(float(s_per_policy[p]))
+        return stuck
 
     #--------------------------------------------------------------------------------------------------------
 

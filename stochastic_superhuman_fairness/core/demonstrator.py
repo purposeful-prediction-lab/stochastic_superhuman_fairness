@@ -82,8 +82,8 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
             )
         # Need to recompute all parameters to account for subset selection from segment I, above.
         self.init_alpha_beta()
-        self.compute_intrademo_subdom(alpha = self.alpha, beta = self.beta)
-        self.compute_intrademo_ot(alpha = self.alpha, beta = self.beta)
+        self.compute_intrademo_subdom(alpha = self.alpha, beta = self.beta, mode=self.cfg.subdominance.mode)
+        self.compute_intrademo_ot()
         self.compute_label_agreement_dict()
     
     # --------------------------------------------------
@@ -132,17 +132,10 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
         self.intrademo_gamma_torch = torch.tensor(out['gamma_np']).to(device)
     # --------------------------------------------------
     def compute_intrademo_subdom(self, alpha=None, beta=None, to_torch=True, mode: str = 'absolute'):
-        '''Default alpha = all ones and beta 0. scalars are repeated to match feature dim K.
-           Per rollout reduction is mean.
-           If cfg.subdominance.feature_based_subdom is True, forces mode='absolute' with
-           alpha=1 and beta=0 regardless of global subdominance settings.
+        '''Computes intra-demo subdominance used for OT/loss (train_intrademo_S_torch etc.).
+           Always uses the alpha/beta/mode passed (or config-derived values from the caller).
+           feature_based_frontier does NOT affect this — it only controls Pareto frontier selection.
         '''
-        if getattr(self.cfg.subdominance, 'feature_based_subdom', False):
-            K = len(self.metrics)
-            mode = 'absolute'
-            alpha = np.ones(K, dtype=np.float32)
-            beta = np.zeros(K, dtype=np.float32)
-
         keys = ['train', 'eval']
         device = 'cpu' if to_torch is False else 'cuda'
         for key in keys:
@@ -452,7 +445,7 @@ class Demonstrator(AgreementStatsMixin, DiagnosticDemosMixin):
     def _compute_intra_demo_subdominance(self):
         if not hasattr(self, 'train_demo_feats'):
            self._compute_standalone_demofeats()
-        if getattr(self.cfg.subdominance, 'feature_based_subdom', False):
+        if getattr(self.cfg.subdominance, 'feature_based_frontier', False):
             K = len(self.metrics)
             mode = 'absolute'
             alpha = np.ones(K, dtype=np.float32)

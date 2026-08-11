@@ -1,15 +1,18 @@
 import numpy, torch
 
 def smooth_gamma(gamma, prev_gamma=None, ema=0.9):
-    if ema < 0. or ema > 1.:
-        raise ValueError(f"Gamma smoothing ema vlas must be in [0,1] but is {ema}, instead.")
+    '''ema may be a scalar (global smoothing) or a tensor broadcastable against
+       gamma/prev_gamma (e.g. [R,1], one weight per rollout row) for per-policy
+       adaptive smoothing.'''
     if prev_gamma is None:
         return gamma
     ema = 0. if ema is None else ema
-    try:
-        return ema * prev_gamma + (1.0 - ema) * gamma
-    except:
-        import ipdb;ipdb.set_trace()
+    ema_check = ema.detach() if torch.is_tensor(ema) else ema
+    out_of_range = bool((ema_check < 0.).any() or (ema_check > 1.).any()) if torch.is_tensor(ema_check) \
+        else (ema_check < 0. or ema_check > 1.)
+    if out_of_range:
+        raise ValueError(f"Gamma smoothing ema values must be in [0,1] but got {ema}.")
+    return ema * prev_gamma + (1.0 - ema) * gamma
 
 
 
