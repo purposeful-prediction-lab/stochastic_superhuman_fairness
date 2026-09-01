@@ -17,7 +17,7 @@ from stochastic_superhuman_fairness.core.plotting.rollout_plots import(
         plot_zero_one_vs_features_mode_coupling,
         plot_zero_one_vs_features_demo_logprobs
         )
-from stochastic_superhuman_fairness.core.plotting.rollout_movies import animate_zero_one_vs_features
+from stochastic_superhuman_fairness.core.plotting.rollout_movies import animate_zero_one_vs_features, export_html_player
 from stochastic_superhuman_fairness.core.plotting.loss_plots import plot_loss_and_subdom
 from stochastic_superhuman_fairness.core.plotting.gamma_plots import plot_gamma_diagnostics_dashboard
 from stochastic_superhuman_fairness.core.plotting.plot_utils import add_cfg_text_to_figure
@@ -118,6 +118,20 @@ def main():
                      help="In the training movie, draw lines to each policy's top-3 matches (ranked by "
                           "--anim_match) instead of just the best one. Rank 1 is solid, rank 2 dashed and "
                           "half as opaque, rank 3 dotted and fainter still.")
+    ap.add_argument("--movie_html", action="store_true",
+                     help="Also export the training movie as a self-contained interactive HTML player "
+                          "(video-like scrub bar + play/pause + speed dropdown), alongside the gif/mp4. "
+                          "No ffmpeg or internet needed -- every frame is embedded inline.")
+    ap.add_argument("--anim_html_name", default="zero_one_vs_features_player.html")
+    ap.add_argument("--anim_speeds", default="0.25,0.5,1,2,4,8",
+                     help="Comma-separated playback-speed multipliers offered in the HTML player's dropdown.")
+    ap.add_argument("--no_gamma_matrix", action="store_true",
+                     help="Hide the per-policy gamma-matrix panel (mass heatmap + perplexity/dispersion "
+                          "per policy) in the training movie. Shown by default.")
+    ap.add_argument("--no_demo_indices", action="store_true",
+                     help="Hide the per-demo index labels (matching the subdominance/gamma heatmaps' demo "
+                          "columns) on the training movie's zero_one_vs_features points. Shown by default "
+                          "when there are <= 50 demos.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--r_opacity", type=float, default=.35)
     args = ap.parse_args()
@@ -443,11 +457,34 @@ def main():
                 alpha_rollouts=args.r_opacity,
                 save_path=anim_out_path,
                 fps=args.anim_fps,
+                show_gamma_matrix=not args.no_gamma_matrix,
+                show_demo_indices=not args.no_demo_indices,
                 match=None if args.anim_match == "none" else args.anim_match,
                 top_k=3 if args.top3_video else 1,
             )
         except ValueError as e:
             print(f"[plot_all] Skipping training movie: {e}")
+
+        if args.movie_html:
+            html_out_path = os.path.join(save_dir, args.anim_html_name)
+            speeds = [float(s) for s in args.anim_speeds.split(",")]
+            try:
+                export_html_player(
+                    logs,
+                    demo_feats,
+                    feature_names=feature_names,
+                    mode_colors=mode_palette[:num_policies],
+                    alpha_rollouts=args.r_opacity,
+                    html_path=html_out_path,
+                    base_fps=args.anim_fps,
+                    speeds=speeds,
+                    show_gamma_matrix=not args.no_gamma_matrix,
+                    show_demo_indices=not args.no_demo_indices,
+                    match=None if args.anim_match == "none" else args.anim_match,
+                    top_k=3 if args.top3_video else 1,
+                )
+            except ValueError as e:
+                print(f"[plot_all] Skipping interactive training movie: {e}")
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     scale = compute_intrademo_scale(logs)

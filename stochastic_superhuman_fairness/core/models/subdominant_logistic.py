@@ -62,6 +62,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         self.committed_gamma = None   # gamma fixed for gamma_commit_freq epochs
         self._last_ot_out = None      # cached diagnostics from last OT solve
         self._policy_S_hist = None    # per-policy rolling mean-S history, for adaptive_ema plateau detection
+        self._last_n_retired = 0      # count of beat_demo_removal-retired pairs at last OT solve
         self.old_top1 = None
 
         # --- create ensemble ---
@@ -145,6 +146,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
         plateau_window: int = 20,     # epochs of mean-S history used to detect a stuck policy
         plateau_tol: float = 0.02,    # relative improvement over the window below which a policy is "stuck"
         stuck_ema: float = 0.3,       # ema applied to stuck policies' rows (lower = forgets stale gamma faster)
+        beat_demo_removal: bool = False,  # if True, fully-beaten (S==0) rollout-demo pairs are deprioritized in the OT cost, not masked out
         **kwargs,
     ):
         '''This function assumes shared x among demos.'''
@@ -271,6 +273,20 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
 
         if self.committed_gamma is None or epoch % gamma_commit_freq == 0:
             S_OT = S * torch.tensor(bj_priors, device=S.device) if weighted_S_matrix else S
+            if beat_demo_removal:
+                # Fully-beaten pairs (S == 0, exact: every feature dim already non-violating)
+                # are deprioritized to the cost of the single worst still-contested pair, so OT
+                # only falls back to them if nothing else is available. Does not touch S itself
+                # (used by the loss's win/lose hinge) -- only this OT-input copy, so there is no
+                # backward-pull effect on the gradient, only on which demo gets matched.
+                retired = (S == 0)
+                self._last_n_retired = int(retired.sum().item())
+                contested = S[~retired]
+                if self._last_n_retired > 0 and contested.numel() > 0:
+                    S_OT = S_OT.clone()
+                    S_OT[retired] = contested.max()
+            else:
+                self._last_n_retired = 0
             out = solve_stochastic_subdom_coupling(
                 S_OT,
                 P,
@@ -402,6 +418,7 @@ class MultiSubdominantLogisticRegressionModel(LogisticRegressionModel):
                           'demo_logprobs':[loss_out.info['demo_logprobs'][m* n_rollouts].sum(dim=1).cpu().tolist() for m in range(P)],
                           'loss_terms': [loss_out.info['term1'], loss_out.info['term2']],
                           'policy_stuck': policy_stuck.tolist() if policy_stuck is not None else None,
+                          'n_retired_pairs': self._last_n_retired,
                           }
 
         if compute_intrademo_ot_loss:
